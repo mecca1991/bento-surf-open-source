@@ -37,8 +37,11 @@ server {
         return 200 "ok\n";
     }
 
-    # Link-opened GoTrue endpoints: no apikey header available in a browser navigation.
-    location ~ ^/auth/v1/(verify|callback|authorize)(/|$) {
+    # Link-opened GoTrue endpoints (no apikey header in a browser navigation) and
+    # the OAuth 2.1 server surface MCP clients such as Claude and ChatGPT call
+    # without any Supabase key: discovery, dynamic client registration, authorize,
+    # token. GoTrue authenticates these itself (client credentials, PKCE, session).
+    location ~ ^/auth/v1/(verify|callback|authorize|oauth|\.well-known)(/|$) {
         rewrite ^/auth/v1/(.*)$ /$1 break;
         proxy_pass $auth_upstream;
         include /etc/nginx/bento-proxy-headers.conf;

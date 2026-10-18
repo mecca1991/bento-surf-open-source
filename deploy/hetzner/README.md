@@ -151,7 +151,13 @@ service_role keys in both env files.
   with `email`, `password`, `email_confirm: true`, service-role key as apikey and
   bearer) before relying on "Forgot password?".
 - Sign-up is closed after step 7. `/signup` on the public site errors by design.
-- MCP OAuth (`auth.oauth.*`) is not enabled on self-hosted GoTrue.
+- MCP OAuth is enabled (GoTrue's OAuth 2.1 server, dynamic client registration
+  on). Agents connect to `https://<host>/mcp`; discovery goes
+  `/.well-known/oauth-protected-resource` -> `/supabase/auth/v1` (also served at
+  the RFC 8414 path-inserted `/.well-known/oauth-authorization-server/supabase/auth/v1`
+  by the edge nginx). The worker advertises `VITE_SUPABASE_URL` as the
+  authorization server because its own `SUPABASE_URL` is the private gateway.
+  Registered clients live in `auth.oauth_clients`; approvals in `auth.oauth_consents`.
 - `/api/health` reports 503 because Dodo, Polar, Browser Rendering and other
   Cloudflare-only pieces are unconfigured; use `/robots.txt` as the liveness probe.
 - Rate-limit keys use `CF-Connecting-IP`, which the shared nginx sets from the

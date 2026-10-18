@@ -96,6 +96,12 @@ services:
       GOTRUE_MAILER_URLPATHS_CONFIRMATION: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
       GOTRUE_MAILER_URLPATHS_RECOVERY: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
       GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
+      # OAuth 2.1 server so AI agents (Claude, ChatGPT, Cursor...) can connect to
+      # Bento's /mcp endpoint. Clients self-register (dynamic registration) and
+      # the operator approves each one on Bento's /oauth/consent page.
+      GOTRUE_OAUTH_SERVER_ENABLED: "true"
+      GOTRUE_OAUTH_SERVER_ALLOW_DYNAMIC_REGISTRATION: "true"
+      GOTRUE_OAUTH_SERVER_AUTHORIZATION_PATH: /oauth/consent
       GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
       GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL: "10"
       GOTRUE_RATE_LIMIT_TOKEN_REFRESH: "150"

@@ -93,7 +93,9 @@ async function payload(response: Response) {
 describe("Bento MCP HTTP surface", () => {
   it("publishes OAuth protected-resource metadata", async () => {
     const previous = process.env.SUPABASE_URL;
+    const previousPublic = process.env.VITE_SUPABASE_URL;
     process.env.SUPABASE_URL = "https://example.supabase.co";
+    delete process.env.VITE_SUPABASE_URL;
     try {
       const response = await handleBentoMcpRequest(
         new Request("http://localhost:8080/.well-known/oauth-protected-resource"),
@@ -106,6 +108,30 @@ describe("Bento MCP HTTP surface", () => {
       });
     } finally {
       process.env.SUPABASE_URL = previous;
+      if (previousPublic === undefined) delete process.env.VITE_SUPABASE_URL;
+      else process.env.VITE_SUPABASE_URL = previousPublic;
+    }
+  });
+
+  it("advertises the public Supabase URL when the worker uses a private one", async () => {
+    // Self-hosted: the worker reaches Supabase over the Docker network, but
+    // Claude and ChatGPT must be sent to the address they can actually resolve.
+    const previous = process.env.SUPABASE_URL;
+    const previousPublic = process.env.VITE_SUPABASE_URL;
+    process.env.SUPABASE_URL = "http://bento_gateway:8000";
+    process.env.VITE_SUPABASE_URL = "https://bento.example.com/supabase/";
+    try {
+      const response = await handleBentoMcpRequest(
+        new Request("https://bento.example.com/.well-known/oauth-protected-resource"),
+        "https://bento.example.com",
+      );
+      await expect(response?.json()).resolves.toMatchObject({
+        authorization_servers: ["https://bento.example.com/supabase/auth/v1"],
+      });
+    } finally {
+      process.env.SUPABASE_URL = previous;
+      if (previousPublic === undefined) delete process.env.VITE_SUPABASE_URL;
+      else process.env.VITE_SUPABASE_URL = previousPublic;
     }
   });
 

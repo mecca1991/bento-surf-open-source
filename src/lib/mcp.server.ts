@@ -2567,6 +2567,14 @@ function configuredSupabaseUrl() {
   return value.replace(/\/$/, "");
 }
 
+// The URL MCP clients must reach for OAuth discovery. On Cloudflare this equals
+// SUPABASE_URL; a self-hosted worker may talk to Supabase over a private address
+// (SUPABASE_URL) while browsers and agents use the public one (VITE_SUPABASE_URL).
+function publicSupabaseUrl() {
+  const value = process.env.VITE_SUPABASE_URL?.trim();
+  return value ? value.replace(/\/$/, "") : configuredSupabaseUrl();
+}
+
 async function authenticateMcpRequest(request: Request): Promise<AuthInfo> {
   const match = request.headers
     .get("authorization")
@@ -2619,7 +2627,7 @@ function protectedResourceMetadata(request: Request) {
   return Response.json(
     {
       resource: `${origin}${MCP_PATH}`,
-      authorization_servers: [`${configuredSupabaseUrl()}/auth/v1`],
+      authorization_servers: [`${publicSupabaseUrl()}/auth/v1`],
       scopes_supported: OAUTH_SCOPES,
       bearer_methods_supported: ["header"],
     },
