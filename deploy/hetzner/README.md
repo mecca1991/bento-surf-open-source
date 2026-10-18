@@ -158,6 +158,11 @@ service_role keys in both env files.
   by the edge nginx). The worker advertises `VITE_SUPABASE_URL` as the
   authorization server because its own `SUPABASE_URL` is the private gateway.
   Registered clients live in `auth.oauth_clients`; approvals in `auth.oauth_consents`.
+  Wrangler's dev proxy rewrites same-host https URLs in response headers to http
+  (Location and the MCP 401 `WWW-Authenticate`); the edge nginx restores both.
+  Connect: Claude -> Settings -> Connectors -> Add custom connector, URL
+  `https://<host>/mcp`; ChatGPT -> Settings -> Connectors -> Advanced ->
+  Developer mode -> Create, same URL, OAuth. Be signed in to Bento in that browser.
 - `/api/health` reports 503 because Dodo, Polar, Browser Rendering and other
   Cloudflare-only pieces are unconfigured; use `/robots.txt` as the liveness probe.
 - Rate-limit keys use `CF-Connecting-IP`, which the shared nginx sets from the
