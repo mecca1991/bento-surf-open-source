@@ -16,9 +16,13 @@ ts="$(date -u +%Y%m%dT%H%M%SZ)"
 install -d -m 700 "$out"
 
 db_file="$out/bento-db-$ts.dump"
-docker exec bento_db pg_dump -U supabase_admin -Fc --no-password postgres > "$db_file.part"
-# A custom-format dump ends with a completion marker; refuse to keep a torn file.
-docker exec -i bento_db pg_restore -l /dev/stdin < "$db_file.part" > /dev/null
+# Dump inside the container, prove pg_restore can read its TOC (a torn dump
+# fails here), then copy it out. pg_restore cannot list a custom-format dump
+# arriving on a pipe, hence the temp file.
+docker exec bento_db sh -c 'pg_dump -U supabase_admin -Fc --no-password -f /tmp/bento-backup.dump postgres && pg_restore -l /tmp/bento-backup.dump > /dev/null'
+docker cp bento_db:/tmp/bento-backup.dump "$db_file.part"
+docker exec bento_db rm -f /tmp/bento-backup.dump
+chmod 600 "$db_file.part"
 mv "$db_file.part" "$db_file"
 
 state_file="$out/bento-state-$ts.tgz"
