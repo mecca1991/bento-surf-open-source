@@ -23,6 +23,16 @@ if docker ps --format '{{.Names}}' | grep -qx bento_auth; then
   exit 1
 fi
 
+# Extensions the dump's objects depend on. They live outside the restored
+# schemas (extensions / pg_catalog), so pg_restore -n never recreates them, and
+# the image does not enable these two by default. btree_gist backs the booking
+# exclusion constraints; pg_cron runs the analytics prune job.
+echo "ensuring btree_gist and pg_cron extensions ..."
+docker exec "$container" psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -q \
+  -c "create extension if not exists btree_gist with schema extensions;" \
+  -c "create extension if not exists pg_cron;" \
+  -c "grant usage on schema cron to postgres;"
+
 echo "copying dump into $container ..."
 docker cp "$dump" "$container:/tmp/bento-restore.dump"
 
@@ -50,15 +60,25 @@ if [[ -n "$unexpected" ]]; then
   echo "full log: $log"
 fi
 
-echo "verifying ..."
-docker exec "$container" psql -U supabase_admin -d postgres -At <<'SQL'
+# The cron schema is Supabase-managed and not part of the restore; re-create the
+# one job Bento's migrations schedule (20260717170000_analytics_rollups.sql).
+echo "ensuring the analytics prune cron job ..."
+docker exec -i "$container" psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -Atq <<'SQL'
+select cron.schedule('bento-prune-analytics-raw', '17 * * * *',
+  $job$select public.prune_analytics_raw(now() - interval '90 days', 25000)$job$)
+where not exists (select 1 from cron.job where jobname = 'bento-prune-analytics-raw');
+SQL
+
+echo "verifying (compare with the same query on the source database) ..."
+docker exec -i "$container" psql -U supabase_admin -d postgres -At <<'SQL'
 select 'schema_migrations='||count(*) from supabase_migrations.schema_migrations;
 select 'auth_users='||count(*) from auth.users;
 select 'profiles='||count(*) from public.profiles;
 select 'workspace_memberships='||count(*) from public.workspace_memberships;
 select 'social_connections='||count(*) from public.social_connections;
 select 'social_posts='||count(*) from public.social_posts;
+select 'social_post_targets='||count(*) from public.social_post_targets;
 select 'creator_brain_items='||count(*) from public.creator_brain_items;
+select 'cron_jobs='||count(*) from cron.job;
 SQL
-echo "expected from the 2026-10-18 dump: schema_migrations=219 auth_users=1 profiles=2 workspace_memberships=2 social_connections=1 social_posts=8 creator_brain_items=20"
 [[ -z "$unexpected" ]] && rm -f "$log"

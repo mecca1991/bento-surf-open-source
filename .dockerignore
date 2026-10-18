@@ -21,7 +21,7 @@ e2e/
 docs/
 cursor-plugin/
 grok-plugin/
-skills/
+# skills/ stays: src/lib/mcp.server.ts imports skills/bento/*.md?raw at build time.
 supabase/.temp/
 supabase/.branches/
 *.log
