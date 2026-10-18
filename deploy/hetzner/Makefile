@@ -24,7 +24,7 @@ check: ## Secrets present, mode 600, no placeholders left
 	@test -f $(BENTO_HOME)/secrets/bento.env || { echo "missing bento.env — run init-secrets.sh"; exit 1; }
 	@for f in $(ENV_FILE) $(BENTO_HOME)/secrets/bento.env; do \
 	  [ "$$(stat -c %a $$f)" = "600" ] || { echo "$$f must be mode 600"; exit 1; }; \
-	  grep -nE '__(CARRY_OVER|RANDOM|ANON_KEY|SERVICE_ROLE_KEY|PG_PASSWORD|PUBLIC_HOST|CRON_TOKEN)__' $$f && { echo "placeholders remain in $$f"; exit 1; }; \
+	  grep -nE '=__(CARRY_OVER|RANDOM|ANON_KEY|SERVICE_ROLE_KEY|PG_PASSWORD|PUBLIC_HOST|CRON_TOKEN)__' $$f && { echo "placeholders remain in $$f"; exit 1; }; \
 	done; echo "secrets ok"
 
 config: check ## Render the merged compose config (secrets stay in the env files)

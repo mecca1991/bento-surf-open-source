@@ -84,4 +84,4 @@ install -m 600 "$tmp" "$secrets_dir/bento.env"
 chmod 600 "$secrets_dir/compose.env"
 
 echo "wrote $secrets_dir/compose.env and $secrets_dir/bento.env"
-echo "next: fill the $(grep -c '__CARRY_OVER__' "$secrets_dir/bento.env") __CARRY_OVER__ values in bento.env from the laptop .env, then run: make check"
+echo "next: fill the $(grep -c '=__CARRY_OVER__$' "$secrets_dir/bento.env") __CARRY_OVER__ values in bento.env from the laptop .env, then run: make check"
