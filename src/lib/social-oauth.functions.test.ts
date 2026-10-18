@@ -3,7 +3,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertSocialOAuthRedirectMatchesEnvironment,
+  authorizationUrl,
   normalizedSocialConnectionScopes,
+  resolveSocialAccountSelection,
   socialProviderCredentialsConfigured,
   socialProviderReadiness,
   socialProviderRedirectUri,
@@ -16,6 +18,7 @@ const ENV_KEYS = [
   "META_INSTAGRAM_APP_SECRET",
   "META_FACEBOOK_APP_ID",
   "META_FACEBOOK_APP_SECRET",
+  "META_FACEBOOK_PUBLISHING_ONLY",
   "REDDIT_CLIENT_ID",
   "REDDIT_CLIENT_SECRET",
   "LINKEDIN_CLIENT_ID",
@@ -133,6 +136,7 @@ describe("social provider credential readiness", () => {
   });
 
   it("requests Facebook Page publishing and Messenger scopes together", () => {
+    delete process.env.META_FACEBOOK_PUBLISHING_ONLY;
     expect(socialProviderRequestedScopes("facebook")).toEqual([
       "pages_show_list",
       "pages_read_user_content",
@@ -143,6 +147,35 @@ describe("social provider credential readiness", () => {
       "pages_messaging",
       "read_insights",
     ]);
+  });
+
+  it("limits the Facebook consent URL and missing-scope fallback to publishing and insights", () => {
+    setEnvironment("META_FACEBOOK_PUBLISHING_ONLY", "true");
+    setEnvironment("VITE_APP_URL", "http://localhost:8080");
+    const url = new URL(authorizationUrl("facebook", "app-id", "oauth-state", ""));
+    const scopes = [
+      "pages_show_list",
+      "pages_read_engagement",
+      "pages_manage_posts",
+      "read_insights",
+    ];
+
+    expect(url.searchParams.get("scope")?.split(",")).toEqual(scopes);
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "http://localhost:8080/integrations/social/facebook/callback",
+    );
+    expect(url.searchParams.get("state")).toBe("oauth-state");
+    expect(normalizedSocialConnectionScopes("facebook", undefined)).toEqual(scopes);
+    expect(normalizedSocialConnectionScopes("facebook", "pages_show_list")).toEqual([
+      "pages_show_list",
+    ]);
+  });
+
+  it("keeps the publishing-only option scoped to Facebook and preserves the default when off", () => {
+    setEnvironment("META_FACEBOOK_PUBLISHING_ONLY", "true");
+    expect(socialProviderRequestedScopes("twitter")).toContain("dm.write");
+    setEnvironment("META_FACEBOOK_PUBLISHING_ONLY", "false");
+    expect(socialProviderRequestedScopes("facebook")).toContain("pages_messaging");
   });
 
   it("requests X posting and Direct Message scopes together", () => {
@@ -183,5 +216,37 @@ describe("social provider credential readiness", () => {
         "https://app.example.com/integrations/social/linkedin/callback",
       ),
     ).toThrow("different Bento environment");
+  });
+});
+
+describe("social account selection", () => {
+  const pages = [
+    { id: "1240941709105885", name: "Intrvuer", token: "page-token-1" },
+    { id: "352329328293863", name: "EduClick Africa", token: "page-token-2" },
+    { id: "545211408668106", name: "TechDirect CM", token: "page-token-3" },
+  ];
+
+  it("asks the creator to choose when one grant returns more accounts than a workspace keeps", () => {
+    // Before this, the first Page Meta listed was stored silently, so a workspace
+    // meant for another Page kept reconnecting to the wrong one.
+    expect(resolveSocialAccountSelection(pages)).toEqual({ accounts: [], selectionRequired: true });
+  });
+
+  it("keeps a single discovered account without asking", () => {
+    expect(resolveSocialAccountSelection(pages.slice(1, 2))).toEqual({
+      accounts: [pages[1]],
+      selectionRequired: false,
+    });
+  });
+
+  it("keeps exactly the chosen account and nothing for an unknown choice", () => {
+    expect(resolveSocialAccountSelection(pages, "352329328293863")).toEqual({
+      accounts: [pages[1]],
+      selectionRequired: false,
+    });
+    expect(resolveSocialAccountSelection(pages, "not-granted")).toEqual({
+      accounts: [],
+      selectionRequired: false,
+    });
   });
 });

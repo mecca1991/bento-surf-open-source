@@ -4,7 +4,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { encryptServerSecret, isServerSecretEncryptionKeyValid } from "./secret-crypto.server";
+import {
+  decryptServerSecret,
+  encryptServerSecret,
+  isServerSecretEncryptionKeyValid,
+} from "./secret-crypto.server";
 import { enforceRequestRateLimit, readResponseText } from "./request-security.server";
 import { socialApiErrorMessage, socialApiPayloadHasError } from "./social-provider-response";
 import { requirePlanEntitlement } from "./plan.server";
@@ -12,6 +16,7 @@ import { durableSocialAvatarUrl } from "./social-avatar.server";
 import { queueInitialSocialInsightsImport } from "./social-analytics.functions";
 import { xAccountCapabilities, xCapabilitiesMetadata } from "./x-account";
 import {
+  MAX_SOCIAL_PROFILES_PER_PROVIDER,
   SOCIAL_PROVIDERS,
   isPublicSocialProvider,
   socialAccountsWithinLimit,
@@ -68,6 +73,12 @@ const SOCIAL_PROVIDER_SCOPES: Record<GenericProvider, readonly string[]> = {
 };
 
 export function socialProviderRequestedScopes(provider: GenericProvider) {
+  if (
+    provider === "facebook" &&
+    process.env.META_FACEBOOK_PUBLISHING_ONLY?.trim().toLowerCase() === "true"
+  ) {
+    return ["pages_show_list", "pages_read_engagement", "pages_manage_posts", "read_insights"];
+  }
   const scopes = [...SOCIAL_PROVIDER_SCOPES[provider]];
   if (provider === "threads" && process.env.THREADS_PROFILE_DISCOVERY_APPROVED === "true")
     scopes.push("threads_profile_discovery");
@@ -206,7 +217,7 @@ export function authorizationUrl(
   > = {
     facebook: {
       base: "https://www.facebook.com/v25.0/dialog/oauth",
-      scope: SOCIAL_PROVIDER_SCOPES.facebook.join(","),
+      scope: socialProviderRequestedScopes("facebook").join(","),
     },
     threads: {
       base: "https://www.threads.net/oauth/authorize",
@@ -544,107 +555,283 @@ export const completeSocialConnection = createServerFn({ method: "POST" })
     const tokens = await durableConnectionTokens(data.provider, exchangedTokens);
     const accessToken = tokens.access_token;
     if (!accessToken) throw new Error("The social network did not return an access token.");
-    const discoveredAccounts = await socialAccountProfiles(data.provider, accessToken);
-    if (!discoveredAccounts.length) throw new Error("No publishable account was found.");
-    const { data: existingConnections, error: existingError } = await db
-      .from("social_connections")
-      .select("provider_user_id,refresh_token")
-      .eq("user_id", context.userId)
-      .eq("provider", data.provider);
-    if (existingError) throw new Error("The connected accounts could not be checked.");
-    const accounts = socialAccountsWithinLimit(
-      (existingConnections || []).map((connection: any) => String(connection.provider_user_id)),
-      discoveredAccounts,
+    const discoveredAccounts: DiscoveredSocialAccount[] = await socialAccountProfiles(
+      data.provider,
+      accessToken,
     );
-    if (!accounts.length) throw new Error("No publishable account was found.");
-    const expiresIn = Number(tokens.expires_in || tokens.data?.expires_in || 0);
-    const refreshToken = tokens.refresh_token || tokens.data?.refresh_token || null;
-    const scopes = normalizedSocialConnectionScopes(data.provider, tokens.scope);
-    const { data: savedConnections, error } = await db
-      .from("social_connections")
-      .upsert(
-        await Promise.all(
-          accounts.map(async (account: any) => {
-            const providerUserId = String(account.id);
-            return {
-              user_id: context.userId,
-              provider: data.provider,
-              provider_user_id: providerUserId,
-              provider_handle: String(account.handle || account.id)
-                .toLowerCase()
-                .slice(0, 100),
-              provider_display_name: String(account.name || account.handle || account.id).slice(
-                0,
-                200,
-              ),
-              provider_avatar_url: await durableSocialAvatarUrl({
-                userId: context.userId,
-                provider: data.provider,
-                providerUserId,
-                value: account.avatar,
-              }),
-              access_token: await encryptServerSecret(account.token, "social"),
-              ...(data.provider === "facebook"
-                ? { facebook_user_access_token: await encryptServerSecret(accessToken, "social") }
-                : {}),
-              refresh_token: refreshToken
-                ? await encryptServerSecret(refreshToken, "social")
-                : // Google can omit refresh_token on repeat consent for the same grant.
-                  data.provider === "youtube"
-                  ? existingConnections?.find(
-                      (existing: any) => existing.provider_user_id === providerUserId,
-                    )?.refresh_token || null
-                  : null,
-              token_expires_at:
-                data.provider === "facebook"
-                  ? null
-                  : expiresIn
-                    ? new Date(Date.now() + expiresIn * 1_000).toISOString()
-                    : null,
-              scopes,
-              ...(data.provider === "twitter" && account.xCapabilities
-                ? { metadata: xCapabilitiesMetadata(account.xCapabilities) }
-                : {}),
-              status: "active",
-              last_error: null,
-              reauth_required: false,
-              provider_error_code: null,
-              connection_health: BASIC_AUTO_DM_PROVIDERS.has(data.provider)
-                ? "verifying"
-                : "healthy",
-              last_verified_at: BASIC_AUTO_DM_PROVIDERS.has(data.provider)
-                ? null
-                : new Date().toISOString(),
-              last_health_check_at: null,
-              token_refresh_lease_id: null,
-              token_refresh_lease_until: null,
-              ...(data.provider === "twitter"
-                ? {
-                    twitter_webhook_check_after: new Date().toISOString(),
-                    twitter_webhook_check_lease_until: null,
-                    webhook_fields: [],
-                  }
-                : {}),
-            };
-          }),
-        ),
-        { onConflict: "user_id,provider,provider_user_id" },
-      )
-      .select("id");
-    if (error) {
-      throw new Error("The connected account could not be saved.");
+    if (!discoveredAccounts.length) throw new Error("No publishable account was found.");
+    const tokenDetails = connectionTokenDetails(tokens);
+    const selection = resolveSocialAccountSelection(discoveredAccounts);
+    if (selection.selectionRequired) {
+      // More accounts than this workspace may hold (for example several Facebook
+      // Pages on one Meta grant): keep the exchanged token aside, encrypted, and
+      // let the creator pick instead of silently taking the first one.
+      const pendingId = await storePendingSocialAccountSelection(db, {
+        userId: context.userId,
+        provider: data.provider,
+        redirectUri: state.redirect_uri,
+        accessToken,
+        ...tokenDetails,
+      });
+      return {
+        connected: 0,
+        skipped: 0,
+        selection: { id: pendingId, accounts: discoveredAccounts.map(publicSocialAccount) },
+      };
     }
-    for (const connection of savedConnections || []) {
-      await queueInitialSocialInsightsImport(context.userId, String(connection.id)).catch(
-        (importError) =>
-          console.warn("Social account connected, but its initial Insights import was deferred.", {
-            connectionId: connection.id,
-            error: importError instanceof Error ? importError.message : "Initial import failed",
-          }),
-      );
-    }
-    return { connected: accounts.length, skipped: discoveredAccounts.length - accounts.length };
+    return saveSocialConnections(db, {
+      userId: context.userId,
+      provider: data.provider,
+      accounts: selection.accounts,
+      discoveredCount: discoveredAccounts.length,
+      accessToken,
+      ...tokenDetails,
+    });
   });
+
+export const selectSocialAccount = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input) =>
+    z
+      .object({
+        provider: z.enum(genericProviders as [GenericProvider, ...GenericProvider[]]),
+        selection: z.string().uuid(),
+        accountId: z.string().min(1).max(100),
+      })
+      .parse(input),
+  )
+  .handler(async ({ context, data }) => {
+    await requireCreatorSocialConnection(context.userId, data.provider);
+    await enforceRequestRateLimit(
+      "EXPENSIVE_API_RATE_LIMITER",
+      "social-oauth-complete",
+      context.userId,
+    );
+    const db = supabaseAdmin as any;
+    const { data: pending } = await db
+      .from("social_oauth_states")
+      .select("*")
+      .eq("id", data.selection)
+      .eq("provider", data.provider)
+      .maybeSingle();
+    await db.from("social_oauth_states").delete().eq("id", data.selection);
+    const metadata = pending?.metadata;
+    if (
+      !pending ||
+      pending.user_id !== context.userId ||
+      new Date(pending.expires_at).getTime() <= Date.now() ||
+      metadata?.kind !== PENDING_ACCOUNT_SELECTION ||
+      typeof metadata.access_token !== "string"
+    ) {
+      throw new Error("This account choice expired. Please connect again.");
+    }
+    const accessToken = await decryptServerSecret(metadata.access_token, "social");
+    const discoveredAccounts: DiscoveredSocialAccount[] = await socialAccountProfiles(
+      data.provider,
+      accessToken,
+    );
+    const selection = resolveSocialAccountSelection(discoveredAccounts, data.accountId);
+    if (!selection.accounts.length) {
+      throw new Error("That account is no longer available. Please connect again.");
+    }
+    return saveSocialConnections(db, {
+      userId: context.userId,
+      provider: data.provider,
+      accounts: selection.accounts,
+      discoveredCount: discoveredAccounts.length,
+      accessToken,
+      expiresIn: Number(metadata.expires_in || 0),
+      refreshToken:
+        typeof metadata.refresh_token === "string"
+          ? await decryptServerSecret(metadata.refresh_token, "social")
+          : null,
+      scope: typeof metadata.scope === "string" ? metadata.scope : undefined,
+    });
+  });
+
+const PENDING_ACCOUNT_SELECTION = "account_selection";
+
+type DiscoveredSocialAccount = {
+  id: string;
+  handle?: string;
+  name?: string;
+  avatar?: string;
+  token: string;
+  xCapabilities?: unknown;
+};
+
+type ConnectionTokenDetails = {
+  expiresIn: number;
+  refreshToken: string | null;
+  scope: string | undefined;
+};
+
+function connectionTokenDetails(tokens: any): ConnectionTokenDetails {
+  return {
+    expiresIn: Number(tokens.expires_in || tokens.data?.expires_in || 0),
+    refreshToken: tokens.refresh_token || tokens.data?.refresh_token || null,
+    scope: typeof tokens.scope === "string" ? tokens.scope : undefined,
+  };
+}
+
+/**
+ * Decides which discovered accounts a connection keeps. With an explicit choice
+ * only that account is kept; otherwise one account is kept automatically and
+ * several mean the creator must choose (a workspace holds one per provider).
+ */
+export function resolveSocialAccountSelection<T extends { id: string }>(
+  discovered: readonly T[],
+  accountId?: string | null,
+): { accounts: T[]; selectionRequired: boolean } {
+  if (accountId) {
+    const match = discovered.find((account) => account.id === accountId);
+    return { accounts: match ? [match] : [], selectionRequired: false };
+  }
+  if (discovered.length > MAX_SOCIAL_PROFILES_PER_PROVIDER) {
+    return { accounts: [], selectionRequired: true };
+  }
+  return { accounts: socialAccountsWithinLimit([], discovered), selectionRequired: false };
+}
+
+function publicSocialAccount(account: DiscoveredSocialAccount) {
+  return {
+    id: String(account.id),
+    name: String(account.name || account.handle || account.id).slice(0, 200),
+    handle: account.handle ? String(account.handle).slice(0, 100) : null,
+    avatar: typeof account.avatar === "string" ? account.avatar : null,
+  };
+}
+
+async function storePendingSocialAccountSelection(
+  db: any,
+  input: {
+    userId: string;
+    provider: GenericProvider;
+    redirectUri: string;
+  } & { accessToken: string } & ConnectionTokenDetails,
+) {
+  const id = crypto.randomUUID();
+  const { error } = await db.from("social_oauth_states").insert({
+    id,
+    user_id: input.userId,
+    provider: input.provider,
+    code_verifier: "",
+    redirect_uri: input.redirectUri,
+    metadata: {
+      kind: PENDING_ACCOUNT_SELECTION,
+      access_token: await encryptServerSecret(input.accessToken, "social"),
+      refresh_token: input.refreshToken
+        ? await encryptServerSecret(input.refreshToken, "social")
+        : null,
+      expires_in: input.expiresIn,
+      scope: input.scope ?? null,
+    },
+  });
+  if (error) throw new Error("The account choice could not be prepared.");
+  return id;
+}
+
+async function saveSocialConnections(
+  db: any,
+  input: {
+    userId: string;
+    provider: GenericProvider;
+    accounts: readonly DiscoveredSocialAccount[];
+    discoveredCount: number;
+    accessToken: string;
+  } & ConnectionTokenDetails,
+) {
+  const { userId, provider, accounts, accessToken, expiresIn, refreshToken } = input;
+  if (!accounts.length) throw new Error("No publishable account was found.");
+  const { data: existingConnections, error: existingError } = await db
+    .from("social_connections")
+    .select("provider_user_id,refresh_token")
+    .eq("user_id", userId)
+    .eq("provider", provider);
+  if (existingError) throw new Error("The connected accounts could not be checked.");
+  const scopes = normalizedSocialConnectionScopes(provider, input.scope);
+  const { data: savedConnections, error } = await db
+    .from("social_connections")
+    .upsert(
+      await Promise.all(
+        accounts.map(async (account: any) => {
+          const providerUserId = String(account.id);
+          return {
+            user_id: userId,
+            provider,
+            provider_user_id: providerUserId,
+            provider_handle: String(account.handle || account.id)
+              .toLowerCase()
+              .slice(0, 100),
+            provider_display_name: String(account.name || account.handle || account.id).slice(
+              0,
+              200,
+            ),
+            provider_avatar_url: await durableSocialAvatarUrl({
+              userId,
+              provider,
+              providerUserId,
+              value: account.avatar,
+            }),
+            access_token: await encryptServerSecret(account.token, "social"),
+            ...(provider === "facebook"
+              ? { facebook_user_access_token: await encryptServerSecret(accessToken, "social") }
+              : {}),
+            refresh_token: refreshToken
+              ? await encryptServerSecret(refreshToken, "social")
+              : // Google can omit refresh_token on repeat consent for the same grant.
+                provider === "youtube"
+                ? existingConnections?.find(
+                    (existing: any) => existing.provider_user_id === providerUserId,
+                  )?.refresh_token || null
+                : null,
+            token_expires_at:
+              provider === "facebook"
+                ? null
+                : expiresIn
+                  ? new Date(Date.now() + expiresIn * 1_000).toISOString()
+                  : null,
+            scopes,
+            ...(provider === "twitter" && account.xCapabilities
+              ? { metadata: xCapabilitiesMetadata(account.xCapabilities) }
+              : {}),
+            status: "active",
+            last_error: null,
+            reauth_required: false,
+            provider_error_code: null,
+            connection_health: BASIC_AUTO_DM_PROVIDERS.has(provider) ? "verifying" : "healthy",
+            last_verified_at: BASIC_AUTO_DM_PROVIDERS.has(provider)
+              ? null
+              : new Date().toISOString(),
+            last_health_check_at: null,
+            token_refresh_lease_id: null,
+            token_refresh_lease_until: null,
+            ...(provider === "twitter"
+              ? {
+                  twitter_webhook_check_after: new Date().toISOString(),
+                  twitter_webhook_check_lease_until: null,
+                  webhook_fields: [],
+                }
+              : {}),
+          };
+        }),
+      ),
+      { onConflict: "user_id,provider,provider_user_id" },
+    )
+    .select("id");
+  if (error) {
+    throw new Error("The connected account could not be saved.");
+  }
+  for (const connection of savedConnections || []) {
+    await queueInitialSocialInsightsImport(userId, String(connection.id)).catch((importError) =>
+      console.warn("Social account connected, but its initial Insights import was deferred.", {
+        connectionId: connection.id,
+        error: importError instanceof Error ? importError.message : "Initial import failed",
+      }),
+    );
+  }
+  return { connected: accounts.length, skipped: input.discoveredCount - accounts.length };
+}
 
 export const disconnectSocialConnection = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
