@@ -158,6 +158,10 @@ service_role keys in both env files.
   by the edge nginx). The worker advertises `VITE_SUPABASE_URL` as the
   authorization server because its own `SUPABASE_URL` is the private gateway.
   Registered clients live in `auth.oauth_clients`; approvals in `auth.oauth_consents`.
+  Tokens are signed with ES256 (`BENTO_JWT_KEYS`): clients request the `openid`
+  scope and GoTrue refuses to sign an ID token with HS256 ("HS256 is not supported
+  for ID token signing", HTTP 500 on `/oauth/token`). The HS256 secret stays in the
+  key set for verification so the anon/service_role keys keep working.
   Wrangler's dev proxy rewrites same-host https URLs in response headers to http
   (Location and the MCP 401 `WWW-Authenticate`); the edge nginx restores both.
   Connect: Claude -> Settings -> Connectors -> Add custom connector, URL

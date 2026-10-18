@@ -25,6 +25,7 @@ for f in compose.env bento.env; do
   fi
 done
 command -v openssl >/dev/null || { echo "openssl is required" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required (JWK encoding)" >&2; exit 1; }
 
 install -d -m 700 "$secrets_dir"
 umask 077
@@ -48,8 +49,43 @@ mint_jwt() {
   printf '%s.%s' "$signing_input" "$signature"
 }
 
+# ES256 signing key as a JWK, plus the HS256 secret as a verify-only `oct` JWK.
+# GoTrue signs with the key whose key_ops contain "sign"; PostgREST receives the
+# public half. python3 only does base64/JSON; openssl generates the key.
+make_jwt_keys() {
+  local secret="$1" kid txt
+  kid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)"
+  txt="$(openssl ecparam -name prime256v1 -genkey -noout | openssl ec -text -noout 2>/dev/null)"
+  python3 - "$kid" "$secret" "$txt" <<'PY'
+import sys, base64, json, re
+kid, secret, txt = sys.argv[1:4]
+def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+def hexblock(label):
+    out, on = [], False
+    for line in txt.split("\n"):
+        if line.strip() == label + ":": on = True; continue
+        if on:
+            if re.fullmatch(r"\s+[0-9a-f:]+", line): out.append(line.strip())
+            else: break
+    return bytes.fromhex("".join(out).replace(":", ""))
+d = hexblock("priv")[-32:].rjust(32, b"\0"); pub = hexblock("pub")
+assert pub[0] == 4 and len(pub) == 65
+priv = {"kty": "EC", "crv": "P-256", "x": b64u(pub[1:33]), "y": b64u(pub[33:65]), "d": b64u(d),
+        "kid": kid, "alg": "ES256", "use": "sig", "key_ops": ["sign", "verify"]}
+pub_jwk = {k: v for k, v in priv.items() if k != "d"}; pub_jwk["key_ops"] = ["verify"]
+legacy = {"kty": "oct", "k": b64u(secret.encode()), "kid": "legacy-hs256", "alg": "HS256",
+          "use": "sig", "key_ops": ["verify"]}
+sep = (",", ":")
+print(json.dumps([priv, legacy], separators=sep))
+print(json.dumps({"keys": [pub_jwk, legacy]}, separators=sep))
+PY
+}
+
 pg_password="$(rand_hex)"
 jwt_secret="$(rand_hex)"
+jwt_keys_out="$(make_jwt_keys "$jwt_secret")"
+jwt_keys="$(printf '%s\n' "$jwt_keys_out" | sed -n 1p)"
+pgrst_jwks="$(printf '%s\n' "$jwt_keys_out" | sed -n 2p)"
 cron_token="$(rand_hex)"
 anon_key="$(mint_jwt anon "$jwt_secret")"
 service_key="$(mint_jwt service_role "$jwt_secret")"
@@ -60,6 +96,8 @@ sed \
   -e "s|^BENTO_PUBLIC_HOST=.*|BENTO_PUBLIC_HOST=$BENTO_PUBLIC_HOST|" \
   -e "s|^BENTO_PG_PASSWORD=.*|BENTO_PG_PASSWORD=$pg_password|" \
   -e "s|^BENTO_JWT_SECRET=.*|BENTO_JWT_SECRET=$jwt_secret|" \
+  -e "s|^BENTO_JWT_KEYS=.*|BENTO_JWT_KEYS=$jwt_keys|" \
+  -e "s|^BENTO_PGRST_JWT_SECRET=.*|BENTO_PGRST_JWT_SECRET=$pgrst_jwks|" \
   -e "s|^BENTO_SUPABASE_ANON_KEY=.*|BENTO_SUPABASE_ANON_KEY=$anon_key|" \
   -e "s|^BENTO_SUPABASE_SERVICE_ROLE_KEY=.*|BENTO_SUPABASE_SERVICE_ROLE_KEY=$service_key|" \
   -e "s|^BENTO_CRON_TOKEN=.*|BENTO_CRON_TOKEN=$cron_token|" \

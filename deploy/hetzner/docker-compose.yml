@@ -72,6 +72,11 @@ services:
       # a one-operator instance on the public internet.
       GOTRUE_DISABLE_SIGNUP: ${BENTO_AUTH_DISABLE_SIGNUP:-false}
       GOTRUE_JWT_SECRET: ${BENTO_JWT_SECRET}
+      # Asymmetric signing (ES256) plus the legacy HS256 secret for verification.
+      # OpenID Connect ID tokens, which MCP clients request via the `openid`
+      # scope, cannot be signed with a shared secret. init-secrets.sh generates
+      # the set; PostgREST gets the matching public JWKS below.
+      GOTRUE_JWT_KEYS: ${BENTO_JWT_KEYS:?BENTO_JWT_KEYS must be set (see init-secrets.sh)}
       GOTRUE_JWT_EXP: "3600"
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
@@ -134,7 +139,7 @@ services:
       PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_MAX_ROWS: "1000"
-      PGRST_JWT_SECRET: ${BENTO_JWT_SECRET}
+      PGRST_JWT_SECRET: ${BENTO_PGRST_JWT_SECRET:?BENTO_PGRST_JWT_SECRET must be set (see init-secrets.sh)}
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_APP_SETTINGS_JWT_SECRET: ${BENTO_JWT_SECRET}
       PGRST_APP_SETTINGS_JWT_EXP: "3600"
