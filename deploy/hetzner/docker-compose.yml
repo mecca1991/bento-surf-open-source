@@ -216,7 +216,7 @@ services:
     command:
       - sh
       - -c
-      - install -o root -g root -m 600 /bento-crontab /etc/crontabs/root && exec crond -f -l 2
+      - install -o root -g root -m 600 /bento-crontab /etc/crontabs/root && exec crond -f -L /dev/stdout -l 2
     environment:
       TZ: UTC
       # Same value as BENTO_CRON_TOKEN in bento.env; vm-entry.mjs compares them.
