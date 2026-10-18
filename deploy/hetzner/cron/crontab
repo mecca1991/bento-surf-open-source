@@ -1,0 +1,7 @@
+# busybox crond schedule for bento_cron (TZ=UTC). Each line calls the VM worker
+# entry's /__scheduled route (deploy/hetzner/vm-entry.mjs) with the shared
+# token; the `cron` value is URL-decoded into the exact expression Bento's
+# scheduled() dispatcher switches on.
+# Keep in sync with "triggers.crons" in deploy/hetzner/wrangler.server.jsonc.
+* * * * * wget -q -O /dev/null -T 55 --header "X-Bento-Cron-Token: $BENTO_CRON_TOKEN" "http://bento_app:8787/__scheduled?cron=*+*+*+*+*" || echo "minute cron failed $(date -u +%FT%TZ)"
+0 9 * * * wget -q -O /dev/null -T 600 --header "X-Bento-Cron-Token: $BENTO_CRON_TOKEN" "http://bento_app:8787/__scheduled?cron=0+9+*+*+*" || echo "daily cron failed $(date -u +%FT%TZ)"

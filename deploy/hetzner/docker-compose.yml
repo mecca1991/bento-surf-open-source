@@ -1,0 +1,242 @@
+# Bento Surf on the shared Hetzner VM.
+#
+# Everything joins the EXTERNAL `shared_network` owned by server-infra; the
+# shared nginx there is the only public entrypoint (host bento.<zone>, see
+# deploy/hetzner/README.md for the vhost). Nothing here publishes a public port.
+#
+# Run through the Makefile in this directory, which supplies the env file:
+#   make -C deploy/hetzner up
+# Interpolation variables come from $BENTO_HOME/secrets/compose.env
+# (template: compose.env.example). The worker's own env is a separate file,
+# $BENTO_HOME/secrets/bento.env, mounted read-only into bento_app.
+
+name: bento
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ------------------------------------------------------------------ database
+  # Same image the Supabase CLI runs on the laptop, so the pg_dump restores 1:1.
+  # The image's own init creates the Supabase roles/schemas (auth, storage,
+  # extensions, ...); schema.sql then sets role passwords and the JWT settings
+  # exactly the way the CLI does (it runs once, on first boot, as supabase_admin).
+  bento_db:
+    image: public.ecr.aws/supabase/postgres:15.19.0.004
+    container_name: bento_db
+    command: ["postgres", "-D", "/etc/postgresql"]
+    environment:
+      POSTGRES_PASSWORD: ${BENTO_PG_PASSWORD:?BENTO_PG_PASSWORD must be set}
+      JWT_SECRET: ${BENTO_JWT_SECRET:?BENTO_JWT_SECRET must be set}
+      JWT_EXP: "3600"
+    volumes:
+      - bento_pg:/var/lib/postgresql/data
+      - ./supabase-init/schema.sql:/etc/postgresql.schema.sql:ro
+    ports:
+      # Loopback only: psql / pg_dump / the guarded migration wrapper from the VM.
+      # The VM has no host firewall, so never drop the 127.0.0.1 prefix.
+      - "127.0.0.1:54322:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: always
+    logging: *default-logging
+    networks:
+      - shared
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ---------------------------------------------------------------------- auth
+  bento_auth:
+    image: public.ecr.aws/supabase/gotrue:v2.197.0
+    container_name: bento_auth
+    depends_on:
+      bento_db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: https://${BENTO_PUBLIC_HOST:?}/supabase/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgresql://supabase_auth_admin:${BENTO_PG_PASSWORD}@bento_db:5432/postgres
+      GOTRUE_SITE_URL: https://${BENTO_PUBLIC_HOST}
+      GOTRUE_URI_ALLOW_LIST: https://${BENTO_PUBLIC_HOST}/**
+      # Flip to "true" once the restored marketing account has logged in: this is
+      # a one-operator instance on the public internet.
+      GOTRUE_DISABLE_SIGNUP: ${BENTO_AUTH_DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_SECRET: ${BENTO_JWT_SECRET}
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_ISSUER: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      # No SMTP is wired yet, so accounts are auto-confirmed and recovery mail
+      # cannot be sent. Optional Mailjet relay: fill the SMTP_* values in compose.env.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_HOST: ${BENTO_SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${BENTO_SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${BENTO_SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${BENTO_SMTP_PASS:-}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${BENTO_SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_SENDER_NAME: Bento Surf
+      GOTRUE_MAILER_URLPATHS_INVITE: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: https://${BENTO_PUBLIC_HOST}/supabase/auth/v1/verify
+      GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
+      GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL: "10"
+      GOTRUE_RATE_LIMIT_TOKEN_REFRESH: "150"
+      GOTRUE_RATE_LIMIT_VERIFY: "30"
+      GOTRUE_RATE_LIMIT_EMAIL_SENT: "30"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: always
+    logging: *default-logging
+    networks:
+      - shared
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ---------------------------------------------------------------------- rest
+  bento_rest:
+    image: public.ecr.aws/supabase/postgrest:v16.4
+    container_name: bento_rest
+    depends_on:
+      bento_db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgresql://authenticator:${BENTO_PG_PASSWORD}@bento_db:5432/postgres
+      PGRST_DB_SCHEMAS: public,graphql_public
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_MAX_ROWS: "1000"
+      PGRST_JWT_SECRET: ${BENTO_JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${BENTO_JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: "3600"
+      PGRST_ADMIN_SERVER_PORT: "3001"
+    restart: always
+    logging: *default-logging
+    networks:
+      - shared
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ------------------------------------------------------------------- gateway
+  # Replaces Supabase's Kong: path routing (/auth/v1, /rest/v1) plus the same
+  # `apikey` header check Kong's key-auth plugin performs. Reached by the worker
+  # at http://bento_gateway:8000 and by browsers through the shared nginx at
+  # https://<host>/supabase/.
+  bento_gateway:
+    image: nginx:1.27-alpine
+    container_name: bento_gateway
+    depends_on:
+      - bento_auth
+      - bento_rest
+    environment:
+      BENTO_SUPABASE_ANON_KEY: ${BENTO_SUPABASE_ANON_KEY:?}
+      BENTO_SUPABASE_SERVICE_ROLE_KEY: ${BENTO_SUPABASE_SERVICE_ROLE_KEY:?}
+    volumes:
+      - ./gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./bento-proxy-headers.conf:/etc/nginx/bento-proxy-headers.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: always
+    logging: *default-logging
+    networks:
+      - shared
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  # ----------------------------------------------------------------------- app
+  bento_app:
+    build:
+      context: ../..
+      dockerfile: deploy/hetzner/Dockerfile
+      secrets:
+        - bento_env
+    image: bento-app:local
+    container_name: bento_app
+    depends_on:
+      bento_gateway:
+        condition: service_healthy
+    environment:
+      BENTO_PUBLIC_HOST: ${BENTO_PUBLIC_HOST}
+      WRANGLER_LOG_LEVEL: ${BENTO_WRANGLER_LOG_LEVEL:-info}
+    volumes:
+      - ${BENTO_HOME:?BENTO_HOME must be set}/secrets/bento.env:/run/secrets/bento_env:ro
+      - bento_state:/data
+    restart: always
+    logging: *default-logging
+    networks:
+      shared:
+        aliases:
+          - bento_app
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # ---------------------------------------------------------------------- cron
+  # Cloudflare fires `scheduled()` itself; here busybox crond calls Wrangler's
+  # --test-scheduled endpoint with the same cron expressions wrangler.jsonc
+  # declares, so Bento's dispatcher sees identical `controller.cron` strings.
+  bento_cron:
+    image: alpine:3.20
+    container_name: bento_cron
+    depends_on:
+      - bento_app
+    command: ["crond", "-f", "-l", "6"]
+    environment:
+      TZ: UTC
+      # Same value as BENTO_CRON_TOKEN in bento.env; vm-entry.mjs compares them.
+      BENTO_CRON_TOKEN: ${BENTO_CRON_TOKEN:?BENTO_CRON_TOKEN must be set}
+    volumes:
+      - ./cron/crontab:/etc/crontabs/root:ro
+    restart: always
+    logging: *default-logging
+    networks:
+      - shared
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+
+secrets:
+  bento_env:
+    file: ${BENTO_HOME:?BENTO_HOME must be set}/secrets/bento.env
+
+volumes:
+  bento_pg:
+    name: bento_pg
+  bento_state:
+    name: bento_state
+
+networks:
+  shared:
+    external: true
+    name: shared_network

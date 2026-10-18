@@ -1,0 +1,96 @@
+// Wrangler configuration for running Bento's production build under Wrangler's
+// LOCAL runtime on a VM (see deploy/hetzner/README.md). Derived from the root
+// wrangler.jsonc; keep the two in sync when upstream adds queues or bindings.
+//
+// Differences from wrangler.jsonc, all deliberate:
+//   - no `ai` / `browser` bindings: both are remote-only in local dev and need a
+//     Cloudflare login. Bento falls back (Groq/OpenRouter for AI, static OG image).
+//   - no `workers_dev`, `preview_urls`, `observability`: deploy-only settings.
+//   - `vars` hold only fixed public switches. URLs and secrets come from the
+//     `.dev.vars` file the entrypoint writes from /opt/bento/secrets/bento.env,
+//     which overrides anything here.
+{
+  "name": "bento-surf-hetzner",
+  // deploy/hetzner/vm-entry.mjs wraps the generated worker.mjs (copied next to
+  // it by the Dockerfile): https scheme from X-Forwarded-Proto, /__scheduled.
+  "main": ".output/server/vm-entry.mjs",
+  // wrangler.jsonc says 2026-09-01 for Cloudflare's always-current servers. The
+  // workerd bundled with the pinned wrangler 4.111.0 supports dates up to
+  // 2026-07-17 and refuses to start otherwise. The Nitro build itself targets
+  // 2026-07-01 (vite.config.ts), so this is within what the bundle expects.
+  // Raise together with the wrangler pin in the Dockerfile.
+  "compatibility_date": "2026-07-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".output/public",
+    "run_worker_first": ["/robots.txt", "/sitemap.xml", "/sitemaps/*", "/llms.txt"],
+  },
+  "images": { "binding": "IMAGES" },
+  "no_bundle": true,
+  "rules": [{ "type": "ESModule", "globs": ["**/*.mjs", "**/*.js"] }],
+  "vars": {
+    "APP_ENV": "production",
+    "BENTO_EDITION": "self_hosted",
+    "VITE_APP_NAME": "Bento Surf",
+    "VITE_SOURCE_URL": "https://github.com/bizibeast/bento-surf-open-source",
+    "COMMERCE_PAYMENT_PROVIDER": "disabled",
+    "DODO_PAYMENTS_ENVIRONMENT": "test_mode",
+    "PAYPAL_ENVIRONMENT": "sandbox",
+    "POLAR_ENVIRONMENT": "sandbox",
+    "SOCIAL_PROVIDER_MODE": "live",
+    "RAZORPAY_ROUTE_ENABLED": "false",
+    "CUSTOM_DOMAINS_ENABLED": "false",
+    "PUBLIC_PAGE_CACHE_TTL_SECONDS": "30",
+    "EMAIL_DELIVERY_MODE": "disabled",
+    "CONTENT_AGENT_PROACTIVE_ENABLED": "false",
+    "CONTENT_AGENT_IMAGES_ENABLED": "false",
+    "CONTENT_AGENT_REFERENCE_VISION_ENABLED": "false",
+    "X_PAID_READS_ENABLED": "false",
+    "X_ACCOUNT_ACTIVITY_ENABLED": "false",
+  },
+  "triggers": { "crons": ["* * * * *", "0 9 * * *"] },
+  "r2_buckets": [{ "binding": "MEDIA_BUCKET", "bucket_name": "bento-media" }],
+  "ratelimits": [
+    { "name": "ANALYTICS_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 10000, "period": 60 } },
+    { "name": "UPLOAD_RATE_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
+    { "name": "PUBLIC_API_RATE_LIMITER", "namespace_id": "1003", "simple": { "limit": 300, "period": 60 } },
+    { "name": "EXPENSIVE_API_RATE_LIMITER", "namespace_id": "1004", "simple": { "limit": 60, "period": 60 } },
+    { "name": "AUTH_EMAIL_RATE_LIMITER", "namespace_id": "1005", "simple": { "limit": 5, "period": 60 } },
+    { "name": "CHECKOUT_RATE_LIMITER", "namespace_id": "1006", "simple": { "limit": 10, "period": 60 } },
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "TELEGRAM_QUEUE", "queue": "bento-telegram" },
+      { "binding": "ANALYTICS_QUEUE", "queue": "bento-analytics" },
+      { "binding": "ANALYTICS_QUEUE_1", "queue": "bento-analytics-1" },
+      { "binding": "ANALYTICS_QUEUE_2", "queue": "bento-analytics-2" },
+      { "binding": "ANALYTICS_QUEUE_3", "queue": "bento-analytics-3" },
+      { "binding": "BILLING_QUEUE", "queue": "bento-billing" },
+      { "binding": "EMAIL_QUEUE", "queue": "bento-email" },
+      { "binding": "SOCIAL_PUBLISH_QUEUE", "queue": "bento-social-publish" },
+      { "binding": "SOCIAL_INSIGHTS_QUEUE", "queue": "bento-social-insights" },
+      { "binding": "CONTENT_MEDIA_QUEUE", "queue": "bento-content-media" },
+      { "binding": "REFERRAL_QUEUE", "queue": "bento-referral" },
+      { "binding": "INSTAGRAM_DM_QUEUE", "queue": "bento-instagram-dm" },
+      { "binding": "TWITTER_DM_QUEUE", "queue": "bento-twitter-dm" },
+      { "binding": "FACEBOOK_DM_QUEUE", "queue": "bento-facebook-dm" },
+    ],
+    "consumers": [
+      { "queue": "bento-content-media", "max_batch_size": 1, "max_batch_timeout": 2, "max_retries": 3, "max_concurrency": 2, "dead_letter_queue": "bento-content-media-dlq" },
+      { "queue": "bento-telegram", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8, "max_concurrency": 4, "dead_letter_queue": "bento-telegram-dlq" },
+      { "queue": "bento-analytics", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "bento-analytics-dlq" },
+      { "queue": "bento-analytics-1", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "bento-analytics-dlq" },
+      { "queue": "bento-analytics-2", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "bento-analytics-dlq" },
+      { "queue": "bento-analytics-3", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "bento-analytics-dlq" },
+      { "queue": "bento-billing", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8, "max_concurrency": 4, "dead_letter_queue": "bento-billing-dlq" },
+      { "queue": "bento-email", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8, "max_concurrency": 4, "dead_letter_queue": "bento-email-dlq" },
+      { "queue": "bento-social-publish", "max_batch_size": 5, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "bento-social-publish-dlq" },
+      { "queue": "bento-social-insights", "max_batch_size": 1, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 2, "dead_letter_queue": "bento-social-insights-dlq" },
+      { "queue": "bento-referral", "max_batch_size": 5, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 2, "dead_letter_queue": "bento-referral-dlq" },
+      { "queue": "bento-instagram-dm", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8, "max_concurrency": 4, "dead_letter_queue": "bento-instagram-dm-dlq" },
+      { "queue": "bento-twitter-dm", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8, "max_concurrency": 4, "dead_letter_queue": "bento-twitter-dm-dlq" },
+      { "queue": "bento-facebook-dm", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 8, "max_concurrency": 4, "dead_letter_queue": "bento-facebook-dm-dlq" },
+    ],
+  },
+}

@@ -1,0 +1,28 @@
+# Build context for deploy/hetzner/Dockerfile. Keep secrets and local state out
+# of the Docker daemon; the env file arrives as a BuildKit secret instead.
+.env
+.env.*
+!.env.example
+.dev.vars*
+.artifacts/
+.output/
+.wrangler/
+.tanstack/
+.git/
+.github/
+.cursor-plugin/
+.superpowers/
+.worktrees/
+node_modules/
+coverage/
+playwright-report/
+test-results/
+e2e/
+docs/
+cursor-plugin/
+grok-plugin/
+skills/
+supabase/.temp/
+supabase/.branches/
+*.log
+*.dump

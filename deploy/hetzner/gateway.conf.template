@@ -1,0 +1,60 @@
+# Supabase API gateway for the Bento stack (stands in for Kong).
+# Rendered by the nginx image's envsubst step from the two key variables.
+#
+# Paths follow the Supabase convention supabase-js expects:
+#   /auth/v1/*  -> GoTrue        (prefix stripped)
+#   /rest/v1/*  -> PostgREST     (prefix stripped)
+# Like Kong's key-auth plugin, requests must carry an `apikey` header equal to
+# the anon or service_role key, except the endpoints browsers open from a link
+# (verify / callback / authorize) and the health probe. Authorization itself is
+# still done by GoTrue and PostgREST (JWT + RLS); this is defense in depth.
+
+map $http_apikey $bento_apikey_ok {
+    default 0;
+    "${BENTO_SUPABASE_ANON_KEY}"         1;
+    "${BENTO_SUPABASE_SERVICE_ROLE_KEY}" 1;
+}
+
+# Docker's embedded DNS, resolved per request so this container starts (and
+# keeps working) regardless of the order the upstreams come up in.
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+server {
+    listen 8000;
+    server_name _;
+    server_tokens off;
+    client_max_body_size 16m;
+
+    set $auth_upstream http://bento_auth:9999;
+    set $rest_upstream http://bento_rest:3000;
+
+    location = /health {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    # Link-opened GoTrue endpoints: no apikey header available in a browser navigation.
+    location ~ ^/auth/v1/(verify|callback|authorize)(/|$) {
+        rewrite ^/auth/v1/(.*)$ /$1 break;
+        proxy_pass $auth_upstream;
+        include /etc/nginx/bento-proxy-headers.conf;
+    }
+
+    location /auth/v1/ {
+        if ($bento_apikey_ok = 0) { return 401 '{"message":"No API key found in request"}'; }
+        rewrite ^/auth/v1/(.*)$ /$1 break;
+        proxy_pass $auth_upstream;
+        include /etc/nginx/bento-proxy-headers.conf;
+    }
+
+    location /rest/v1/ {
+        if ($bento_apikey_ok = 0) { return 401 '{"message":"No API key found in request"}'; }
+        rewrite ^/rest/v1/(.*)$ /$1 break;
+        proxy_pass $rest_upstream;
+        include /etc/nginx/bento-proxy-headers.conf;
+    }
+
+    location / {
+        return 404;
+    }
+}
