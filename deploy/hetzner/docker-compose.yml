@@ -210,13 +210,19 @@ services:
     container_name: bento_cron
     depends_on:
       - bento_app
-    command: ["crond", "-f", "-l", "6"]
+    # busybox crond only honours a root-owned, non-writable crontab, and the
+    # bind-mounted file arrives with the host owner (deploy). Copy it into place
+    # first. -l 2 logs every job run so `make logs s=bento_cron` shows the beat.
+    command:
+      - sh
+      - -c
+      - install -o root -g root -m 600 /bento-crontab /etc/crontabs/root && exec crond -f -l 2
     environment:
       TZ: UTC
       # Same value as BENTO_CRON_TOKEN in bento.env; vm-entry.mjs compares them.
       BENTO_CRON_TOKEN: ${BENTO_CRON_TOKEN:?BENTO_CRON_TOKEN must be set}
     volumes:
-      - ./cron/crontab:/etc/crontabs/root:ro
+      - ./cron/crontab:/bento-crontab:ro
     restart: always
     logging: *default-logging
     networks:
