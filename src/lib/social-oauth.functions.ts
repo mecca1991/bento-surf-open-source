@@ -445,21 +445,22 @@ export async function socialAccountProfiles(
     const data = await get(
       `https://graph.facebook.com/v25.0/me/accounts?fields=id,name,access_token,picture&access_token=${encodeURIComponent(token)}`,
     );
-    const pages: any[] = data.data || [];
-    if (!pages.length) {
-      // Meta's accounts edge can come back empty for a grant that was narrowed
-      // to specific Pages in the consent dialog, although each granted Page is
-      // still readable directly. The token debugger lists exactly those Pages.
-      const { clientId, clientSecret } = credentials("facebook");
-      const debug = await get(
-        `https://graph.facebook.com/v25.0/debug_token?input_token=${encodeURIComponent(token)}&access_token=${encodeURIComponent(`${clientId}|${clientSecret}`)}`,
-      );
-      for (const pageId of facebookPageIdsFromTokenDebug(debug)) {
-        const page = await get(
-          `https://graph.facebook.com/v25.0/${encodeURIComponent(pageId)}?fields=id,name,access_token,picture&access_token=${encodeURIComponent(token)}`,
-        ).catch(() => null);
-        if (page?.access_token) pages.push(page);
-      }
+    const pages: any[] = (data.data || []).filter((page: any) => page?.id && page.access_token);
+    // Meta's accounts edge only lists Pages the person holds a direct Page role
+    // on. Pages granted through a business portfolio are missing from it even
+    // though the grant covers them and each is readable directly. When the
+    // consent dialog was limited to chosen Pages, the token debugger names
+    // them, so merge those in; an "all Pages" grant names none.
+    const { clientId, clientSecret } = credentials("facebook");
+    const debug = await get(
+      `https://graph.facebook.com/v25.0/debug_token?input_token=${encodeURIComponent(token)}&access_token=${encodeURIComponent(`${clientId}|${clientSecret}`)}`,
+    ).catch(() => null);
+    for (const pageId of facebookPageIdsFromTokenDebug(debug)) {
+      if (pages.some((page) => String(page.id) === pageId)) continue;
+      const page = await get(
+        `https://graph.facebook.com/v25.0/${encodeURIComponent(pageId)}?fields=id,name,access_token,picture&access_token=${encodeURIComponent(token)}`,
+      ).catch(() => null);
+      if (page?.access_token) pages.push(page);
     }
     return pages.map((page: any) => ({
       id: String(page.id),
