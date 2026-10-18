@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertSocialOAuthRedirectMatchesEnvironment,
   authorizationUrl,
+  facebookPageIdsFromTokenDebug,
   normalizedSocialConnectionScopes,
   resolveSocialAccountSelection,
   socialProviderCredentialsConfigured,
@@ -248,5 +249,37 @@ describe("social account selection", () => {
       accounts: [],
       selectionRequired: false,
     });
+  });
+});
+
+describe("Facebook Page discovery from the token debugger", () => {
+  it("reads the Pages a narrowed grant covers, publishing scope first", () => {
+    // Seen on 2026-10-18: /me/accounts returned [] for a grant limited to two
+    // of three Pages, while each granted Page was still readable directly.
+    expect(
+      facebookPageIdsFromTokenDebug({
+        data: {
+          granular_scopes: [
+            { scope: "pages_show_list", target_ids: ["545211408668106", "352329328293863"] },
+            { scope: "pages_manage_posts", target_ids: ["352329328293863", "545211408668106"] },
+          ],
+        },
+      }),
+    ).toEqual(["352329328293863", "545211408668106"]);
+  });
+
+  it("falls back to the listing scope and ignores malformed input", () => {
+    expect(
+      facebookPageIdsFromTokenDebug({
+        data: { granular_scopes: [{ scope: "pages_show_list", target_ids: [123, "x", 123] }] },
+      }),
+    ).toEqual(["123"]);
+    expect(
+      facebookPageIdsFromTokenDebug({
+        data: { granular_scopes: [{ scope: "pages_manage_posts" }] },
+      }),
+    ).toEqual([]);
+    expect(facebookPageIdsFromTokenDebug(null)).toEqual([]);
+    expect(facebookPageIdsFromTokenDebug({ error: { message: "bad token" } })).toEqual([]);
   });
 });

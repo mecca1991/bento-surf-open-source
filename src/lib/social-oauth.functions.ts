@@ -382,6 +382,28 @@ async function durableConnectionTokens(provider: GenericProvider, tokens: any) {
   return tokens;
 }
 
+/**
+ * Page ids a Facebook user token was granted for publishing, read from Meta's
+ * token debugger (`granular_scopes`). Order is kept so the first Page matches
+ * what the consent dialog listed first; duplicates are removed.
+ */
+export function facebookPageIdsFromTokenDebug(debug: unknown): string[] {
+  const data = (debug as { data?: { granular_scopes?: unknown } } | null)?.data;
+  const scopes = Array.isArray(data?.granular_scopes) ? data.granular_scopes : [];
+  const ids: string[] = [];
+  for (const scope of ["pages_manage_posts", "pages_show_list"]) {
+    const entry = scopes.find(
+      (candidate: any) => candidate?.scope === scope && Array.isArray(candidate.target_ids),
+    );
+    for (const id of entry?.target_ids || []) {
+      const value = String(id);
+      if (/^\d{1,32}$/.test(value) && !ids.includes(value)) ids.push(value);
+    }
+    if (ids.length) break;
+  }
+  return ids;
+}
+
 export async function socialAccountProfiles(
   provider: GenericProvider,
   token: string,
@@ -423,7 +445,23 @@ export async function socialAccountProfiles(
     const data = await get(
       `https://graph.facebook.com/v25.0/me/accounts?fields=id,name,access_token,picture&access_token=${encodeURIComponent(token)}`,
     );
-    return (data.data || []).map((page: any) => ({
+    const pages: any[] = data.data || [];
+    if (!pages.length) {
+      // Meta's accounts edge can come back empty for a grant that was narrowed
+      // to specific Pages in the consent dialog, although each granted Page is
+      // still readable directly. The token debugger lists exactly those Pages.
+      const { clientId, clientSecret } = credentials("facebook");
+      const debug = await get(
+        `https://graph.facebook.com/v25.0/debug_token?input_token=${encodeURIComponent(token)}&access_token=${encodeURIComponent(`${clientId}|${clientSecret}`)}`,
+      );
+      for (const pageId of facebookPageIdsFromTokenDebug(debug)) {
+        const page = await get(
+          `https://graph.facebook.com/v25.0/${encodeURIComponent(pageId)}?fields=id,name,access_token,picture&access_token=${encodeURIComponent(token)}`,
+        ).catch(() => null);
+        if (page?.access_token) pages.push(page);
+      }
+    }
+    return pages.map((page: any) => ({
       id: String(page.id),
       handle: page.name,
       name: page.name,
