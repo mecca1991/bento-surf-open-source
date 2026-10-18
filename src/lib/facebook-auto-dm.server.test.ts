@@ -20,6 +20,7 @@ import {
   readFacebookRunActionPayload,
   verifyFacebookWebhookSignature,
   type FacebookDmQueueMessage,
+  facebookConnectionSupportsWebhooks,
 } from "./facebook-auto-dm.server";
 
 const SECRET = "test-facebook-app-secret";
@@ -155,5 +156,33 @@ describe("Facebook Auto-DM Meta policy windows", () => {
     expect(
       getFacebookAutoDmPolicyWindowFailure(messageEvent, Date.parse("2026-07-31T00:00:00.001Z")),
     ).toMatchObject({ code: "conversation_window_expired" });
+  });
+});
+
+describe("Facebook connection health audit scope gate", () => {
+  it("only verifies webhooks for Pages granted pages_manage_metadata", () => {
+    expect(
+      facebookConnectionSupportsWebhooks([
+        "pages_show_list",
+        "pages_manage_metadata",
+        "pages_messaging",
+      ]),
+    ).toBe(true);
+  });
+
+  it("treats a publishing-only grant as having nothing to verify", () => {
+    // META_FACEBOOK_PUBLISHING_ONLY requests exactly these four scopes. Asking
+    // Meta to subscribe webhooks with them returns permission error 200, which
+    // must not be reported as a revoked token.
+    expect(
+      facebookConnectionSupportsWebhooks([
+        "pages_show_list",
+        "pages_read_engagement",
+        "pages_manage_posts",
+        "read_insights",
+      ]),
+    ).toBe(false);
+    expect(facebookConnectionSupportsWebhooks(null)).toBe(false);
+    expect(facebookConnectionSupportsWebhooks(undefined)).toBe(false);
   });
 });

@@ -512,14 +512,25 @@ type FacebookConnectionAuditRow = {
   provider_user_id: string;
   access_token: string;
   last_health_check_at: string | null;
+  scopes: string[] | null;
 };
+
+// Subscribing a Page to webhooks (`/{page}/subscribed_apps`) needs this
+// permission. A publishing-only grant (META_FACEBOOK_PUBLISHING_ONLY) never
+// requests it, and Meta then answers with permission error 200, which
+// facebookMetaErrorNeedsReauth() otherwise reads as a revoked token.
+export const FACEBOOK_WEBHOOK_SUBSCRIPTION_SCOPE = "pages_manage_metadata";
+
+export function facebookConnectionSupportsWebhooks(scopes: readonly string[] | null | undefined) {
+  return Boolean(scopes?.includes(FACEBOOK_WEBHOOK_SUBSCRIPTION_SCOPE));
+}
 
 export async function auditFacebookConnections(now = new Date()) {
   const verificationCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1_000).toISOString();
   const retryCutoff = new Date(now.getTime() - 15 * 60 * 1_000).toISOString();
   const { data, error } = await (supabaseAdmin as any)
     .from("social_connections")
-    .select("id, user_id, provider_user_id, access_token, last_health_check_at")
+    .select("id, user_id, provider_user_id, access_token, last_health_check_at, scopes")
     .eq("provider", "facebook")
     .eq("status", "active")
     .or(`last_verified_at.is.null,last_verified_at.lt.${verificationCutoff}`)
@@ -539,6 +550,25 @@ export async function auditFacebookConnections(now = new Date()) {
   for (const connection of (data || []) as FacebookConnectionAuditRow[]) {
     result.checked += 1;
     const healthCheckedAt = now.toISOString();
+    if (!facebookConnectionSupportsWebhooks(connection.scopes)) {
+      // Publishing-only Page: nothing to verify. Posting and Insights do not
+      // use webhooks, and asking Meta would only produce a permission error
+      // that disconnects a working Page every five minutes.
+      await (supabaseAdmin as any)
+        .from("social_connections")
+        .update({
+          connection_health: "healthy",
+          webhook_fields: [],
+          last_verified_at: healthCheckedAt,
+          last_health_check_at: healthCheckedAt,
+          reauth_required: false,
+          provider_error_code: null,
+          last_error: null,
+        })
+        .eq("id", connection.id);
+      result.healthy += 1;
+      continue;
+    }
     try {
       const token = await decryptFacebookConnectionAccessToken(connection.access_token);
       const verification = await subscribeFacebookPageWebhooks(connection.provider_user_id, token);
