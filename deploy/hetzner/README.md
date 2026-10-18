@@ -144,8 +144,12 @@ service_role keys in both env files.
 
 ## Known limitations
 
-- GoTrue has no SMTP by default: no password recovery or invite mail. Keep the
-  operator password safe; a Mailjet relay can be added through `compose.env`.
+- Recovery mail depends on the `BENTO_SMTP_*` relay in `compose.env` (Mailjet, the
+  same API key/secret EduClick uses, sender `no-reply@educlick.africa`). The
+  restored account's address (`marketing@example.test`) is not a real mailbox, so
+  change it first through the GoTrue admin API (`PUT /auth/v1/admin/users/{id}`
+  with `email`, `password`, `email_confirm: true`, service-role key as apikey and
+  bearer) before relying on "Forgot password?".
 - Sign-up is closed after step 7. `/signup` on the public site errors by design.
 - MCP OAuth (`auth.oauth.*`) is not enabled on self-hosted GoTrue.
 - `/api/health` reports 503 because Dodo, Polar, Browser Rendering and other

@@ -80,9 +80,12 @@ services:
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
       GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
       GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
-      # No SMTP is wired yet, so accounts are auto-confirmed and recovery mail
-      # cannot be sent. Optional Mailjet relay: fill the SMTP_* values in compose.env.
+      # Accounts are auto-confirmed (sign-up is closed anyway). Recovery / email
+      # change mail goes out through the BENTO_SMTP_* relay in compose.env
+      # (Mailjet, sender no-reply@educlick.africa since 2026-10-18); with the
+      # values empty GoTrue simply cannot send and "Forgot password?" is dead.
       GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_MAILER_EXTERNAL_HOSTS: ${BENTO_PUBLIC_HOST}
       GOTRUE_SMTP_HOST: ${BENTO_SMTP_HOST:-}
       GOTRUE_SMTP_PORT: ${BENTO_SMTP_PORT:-587}
       GOTRUE_SMTP_USER: ${BENTO_SMTP_USER:-}
