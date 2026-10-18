@@ -9,6 +9,10 @@
 # (verify / callback / authorize) and the health probe. Authorization itself is
 # still done by GoTrue and PostgREST (JWT + RLS); this is defense in depth.
 
+# The keys are JWTs (~200 chars); nginx's default 64-byte bucket cannot hold them.
+map_hash_bucket_size 512;
+map_hash_max_size 4096;
+
 map $http_apikey $bento_apikey_ok {
     default 0;
     "${BENTO_SUPABASE_ANON_KEY}"         1;
