@@ -323,14 +323,96 @@ export async function verifyEmailPreferenceToken(token: string) {
   }
 }
 
+/**
+ * Which HTTP API delivers mail. "resend" (default) posts to Resend; "mailjet"
+ * posts to Mailjet's v3.1 Send API with MAILJET_API_KEY / MAILJET_API_SECRET.
+ * Addressing stays in RESEND_FROM_EMAIL ("Name <email>" allowed),
+ * RESEND_REPLY_TO and RESEND_TEST_RECIPIENT for both providers.
+ */
+function emailProvider(): "resend" | "mailjet" {
+  return process.env.EMAIL_PROVIDER?.trim().toLowerCase() === "mailjet" ? "mailjet" : "resend";
+}
+
+function providerCredentialsPresent() {
+  return emailProvider() === "mailjet"
+    ? Boolean(process.env.MAILJET_API_KEY?.trim() && process.env.MAILJET_API_SECRET?.trim())
+    : Boolean(process.env.RESEND_API_KEY?.trim());
+}
+
 function resendReady() {
   const mode = process.env.EMAIL_DELIVERY_MODE || "disabled";
   return Boolean(
     mode !== "disabled" &&
-    process.env.RESEND_API_KEY?.trim() &&
+    providerCredentialsPresent() &&
     process.env.RESEND_FROM_EMAIL?.trim() &&
     process.env.EMAIL_SIGNING_SECRET?.trim(),
   );
+}
+
+/** Splits "Name <email>" into its parts; a bare address has no name. */
+function splitAddress(value: string): { email: string; name?: string } {
+  const match = value.match(/^\s*(.*?)\s*<([^>]+)>\s*$/);
+  return match ? { email: match[2].trim(), name: match[1].trim() || undefined } : { email: value.trim() };
+}
+
+async function sendWithMailjet(input: {
+  eventKey: string;
+  from: string;
+  to: string;
+  replyTo?: string;
+  subject: string;
+  html: string;
+  text: string;
+  headers: Record<string, string>;
+}): Promise<string> {
+  const key = process.env.MAILJET_API_KEY!.trim();
+  const secret = process.env.MAILJET_API_SECRET!.trim();
+  const from = splitAddress(input.from);
+  // Mailjet's Send API accepts only custom (X-) headers here; List-Unsubscribe
+  // and friends are dropped rather than failing the whole send.
+  const headers = Object.fromEntries(
+    Object.entries(input.headers).filter(([name]) => /^x-/i.test(name)),
+  );
+  const response = await fetch("https://api.mailjet.com/v3.1/send", {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${btoa(`${key}:${secret}`)}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      Messages: [
+        {
+          From: { Email: from.email, ...(from.name ? { Name: from.name } : {}) },
+          To: [{ Email: input.to }],
+          ...(input.replyTo ? { ReplyTo: { Email: splitAddress(input.replyTo).email } } : {}),
+          Subject: input.subject,
+          TextPart: input.text,
+          HTMLPart: input.html,
+          ...(Object.keys(headers).length ? { Headers: headers } : {}),
+          // Mailjet caps CustomID at 64 characters; the event key is longer.
+          CustomID: input.eventKey.slice(0, 64),
+        },
+      ],
+    }),
+  });
+  const result = (await response.json().catch(() => ({}))) as {
+    Messages?: Array<{
+      Status?: string;
+      Errors?: Array<{ ErrorMessage?: string }>;
+      To?: Array<{ MessageUUID?: string; MessageID?: number | string }>;
+    }>;
+    ErrorMessage?: string;
+  };
+  const message = result.Messages?.[0];
+  const id = message?.To?.[0]?.MessageUUID || message?.To?.[0]?.MessageID;
+  if (!response.ok || message?.Status !== "success" || !id) {
+    throw new Error(
+      message?.Errors?.map((error) => error.ErrorMessage).filter(Boolean).join("; ") ||
+        result.ErrorMessage ||
+        `Mailjet returned ${response.status}.`,
+    );
+  }
+  return String(id);
 }
 
 export function getEmailDeliveryReadiness() {
@@ -519,10 +601,11 @@ async function sendWithResend(row: EmailOutboxRow) {
     return false;
   }
   const mode = process.env.EMAIL_DELIVERY_MODE || "disabled";
+  const provider = emailProvider();
   const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.RESEND_FROM_EMAIL?.trim();
-  if (!apiKey || !from || mode === "disabled")
-    throw new Error("Resend delivery is not configured.");
+  if (!providerCredentialsPresent() || !from || mode === "disabled")
+    throw new Error(`${provider === "mailjet" ? "Mailjet" : "Resend"} delivery is not configured.`);
   let unsubscribeUrl: string | undefined;
   if (row.category === "marketing") {
     const token =
@@ -584,6 +667,30 @@ async function sendWithResend(row: EmailOutboxRow) {
           : row.user_id || undefined,
     },
   );
+  const replyTo =
+    normalizeEmailRecipient(String(row.payload?.replyTo || "")) ||
+    process.env.RESEND_REPLY_TO?.trim() ||
+    undefined;
+  if (provider === "mailjet") {
+    const providerEmailId = await sendWithMailjet({
+      eventKey: row.event_key,
+      from,
+      to: delivery.recipient,
+      replyTo,
+      subject: delivery.subject,
+      html: rendered.html,
+      text: rendered.text,
+      headers,
+    });
+    await updateOutbox(row.id, {
+      status: "sent",
+      provider_email_id: providerEmailId,
+      sent_at: new Date().toISOString(),
+      last_error: null,
+    });
+    await updateCampaignRecipientForOutbox(row.id, { status: "sent", skip_reason: null });
+    return true;
+  }
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
