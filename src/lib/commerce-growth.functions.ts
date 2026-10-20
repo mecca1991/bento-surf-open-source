@@ -1086,6 +1086,18 @@ export const sendAudienceCampaignTest = createServerFn({ method: "POST" })
     await requireGrowthEntitlement(context.userId, "emailMarketing");
     const db = supabaseAdmin as any;
     await requireOwnedNewsletterPublication(db, context.userId, data.publicationId);
+    // context.userId is the workspace id. Only the primary workspace shares its id with
+    // an auth user; an additional workspace (see workspace_memberships) does not, and
+    // auth.admin.getUserById(workspaceId) then fails with "User not found". Resolve the
+    // owner's auth user first, as creatorIdentity() in email.server.ts does.
+    const { data: ownerMembership, error: membershipError } = await db
+      .from("workspace_memberships")
+      .select("auth_user_id")
+      .eq("workspace_id", context.userId)
+      .eq("role", "owner")
+      .maybeSingle();
+    if (membershipError) throw new Error(membershipError.message);
+    const ownerAuthUserId: string = ownerMembership?.auth_user_id || context.userId;
     const [
       { data: campaign, error: campaignError },
       { data: authUser, error: authError },
@@ -1100,7 +1112,7 @@ export const sendAudienceCampaignTest = createServerFn({ method: "POST" })
         .eq("kind", data.kind)
         .eq("status", "draft")
         .maybeSingle(),
-      db.auth.admin.getUserById(context.userId),
+      db.auth.admin.getUserById(ownerAuthUserId),
       db.from("profiles").select("username,display_name").eq("id", context.userId).maybeSingle(),
     ]);
     if (campaignError) throw new Error(campaignError.message);
@@ -1146,7 +1158,8 @@ export const sendAudienceCampaignTest = createServerFn({ method: "POST" })
         eventType: "creator_campaign",
         category: "transactional",
         recipientEmail,
-        userId: context.userId,
+        // email_outbox.user_id references auth.users, so it takes the login, not the workspace.
+        userId: ownerAuthUserId,
         payload: {
           creatorName: profile?.display_name || profile?.username || "Broadcast test",
           creatorUrl: profile?.username
