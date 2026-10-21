@@ -421,13 +421,31 @@ export async function generateConnectedBrainSuggestions(
       message: "The AI response did not cite exact quotes from the supplied posts.",
     });
   const strategySchema = groundedSchema.refine(
-    ({ suggestions }) =>
-      ["X Strategy", "LinkedIn Strategy"].every((title) => {
+    ({ suggestions }) => {
+      const complete = ["X Strategy", "LinkedIn Strategy"].every((title) => {
         const strategy = suggestions.find(
           (item) => item.kind === "strategy" && item.title === title,
         );
         return strategy && completeContentStrategy(strategy.content);
-      }),
+      });
+      if (!complete) {
+        // Diagnostic: which strategy documents came back and how they open, so a
+        // rejected Brain build can be fixed instead of retried blind.
+        console.warn(
+          "[brain] strategy check failed",
+          JSON.stringify(
+            suggestions
+              .filter((item) => item.kind === "strategy")
+              .map((item) => ({
+                title: item.title,
+                complete: completeContentStrategy(item.content),
+                headings: [...item.content.matchAll(/^#{1,3}\s+.+$/gm)].map((m) => m[0]).slice(0, 14),
+              })),
+          ),
+        );
+      }
+      return complete;
+    },
     {
       message:
         "Both platform strategies need the full one-page structure and weighted pillars totaling 100%.",
