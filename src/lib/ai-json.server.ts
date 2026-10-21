@@ -3,15 +3,40 @@ import { z } from "zod";
 import { readResponseText } from "./request-security.server";
 
 export const WORKERS_AI_MODEL = "@cf/openai/gpt-oss-20b";
-export const GROQ_MODEL = "openai/gpt-oss-20b";
+/** GROQ_TEXT_MODEL overrides the Groq chat model; the default is the one Bento ships with. */
+export const GROQ_MODEL = process.env.GROQ_TEXT_MODEL?.trim() || "openai/gpt-oss-20b";
 export const OPENROUTER_MODEL = "deepseek/deepseek-v4-flash-0731";
 const MAX_PROVIDER_RESPONSE_BYTES = 128 * 1024;
 
 export type AiProvider = "openrouter" | "workers-ai" | "groq";
 export class AiProviderRequestError extends Error {
-  constructor(public readonly status: number, public readonly provider: AiProvider) {
-    super(`AI provider request failed (${status}).`);
+  constructor(
+    public readonly status: number,
+    public readonly provider: AiProvider,
+    detail?: string,
+  ) {
+    super(`AI provider request failed (${status}).${detail ? ` ${detail}` : ""}`);
     this.name = "AiProviderRequestError";
+  }
+}
+
+/** The provider's own error message, bounded, so an index or agent failure says why. */
+async function providerErrorDetail(response: Response) {
+  try {
+    const text = (await response.text()).slice(0, 2_000);
+    try {
+      const parsed = JSON.parse(text) as { error?: { message?: string } | string; message?: string };
+      const message =
+        typeof parsed.error === "string"
+          ? parsed.error
+          : parsed.error?.message || parsed.message;
+      if (message) return message.slice(0, 300);
+    } catch {
+      // not JSON
+    }
+    return text.slice(0, 300);
+  } catch {
+    return undefined;
   }
 }
 export type AiMessage = { role: "system" | "user"; content: string };
@@ -172,7 +197,11 @@ async function executeAiProviderRequest(
       },
     );
     if (!providerResponse.ok)
-      throw new AiProviderRequestError(providerResponse.status, provider);
+      throw new AiProviderRequestError(
+        providerResponse.status,
+        provider,
+        await providerErrorDetail(providerResponse),
+      );
     response = JSON.parse(await readResponseText(providerResponse, MAX_PROVIDER_RESPONSE_BYTES));
   }
   signal?.throwIfAborted();
