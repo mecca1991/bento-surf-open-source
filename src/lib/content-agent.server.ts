@@ -441,7 +441,9 @@ export async function generateConnectedBrainSuggestions(
       schema: strategySchema,
       responseFormat: { type: "json_object" },
       workersAiModel: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-      maxTokens: 4_000,
+      // Profile, voice, up to six stories and two complete strategies do not fit in
+      // 4,000 tokens for a creator with 100+ posts; the strategies came back cut off.
+      maxTokens: 8_000,
       temperature: 0.2,
     },
     env,
