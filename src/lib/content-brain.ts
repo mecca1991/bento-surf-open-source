@@ -137,9 +137,16 @@ export function completeContentStrategy(content: string) {
     "Posting Rhythm",
     "Notes",
   ];
-  if (!sections.every((section) => new RegExp(`^#{1,3} ${section}\\s*$`, "mi").test(content)))
+  // Headings may carry a trailing colon; a pillar heading may put its weight anywhere
+  // on the line ("### 40% Name", "### Name (40%)", "### Name — 40 %"). Models vary
+  // and the strict shape rejected otherwise complete strategies.
+  if (
+    !sections.every((section) =>
+      new RegExp(`^#{1,3}\\s*\\**${section}\\**\\s*:?\\s*$`, "mi").test(content),
+    )
+  )
     return false;
-  const pillars = [...content.matchAll(/^###\s+(\d{1,3})%\s+.+$/gm)];
+  const pillars = [...content.matchAll(/^###\s+.*?(\d{1,3})\s*%/gm)];
   return (
     pillars.length >= 2 &&
     pillars.reduce((sum, match) => sum + Number(match[1]), 0) === 100 &&
