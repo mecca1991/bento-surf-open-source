@@ -83,7 +83,8 @@ export async function reserveXRead(url: string | URL, workspaceId?: string) {
 /** Conservative token bound: UTF-8 bytes plus envelope overhead, not chars/4. */
 export function aiReservationMicrousd(messages: unknown, maxTokens: number) {
   const bytes = new TextEncoder().encode(JSON.stringify(messages)).byteLength;
-  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 8000 || bytes > 128_000)
+  // Bounds sized for Groq's 131k-token context: ~400 KB of input and 16k output tokens.
+  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 16_000 || bytes > 400_000)
     throw new Error("AI request is too large. Shorten the supplied content and try again.");
   // Upper routing rates: $3/M input and $15/M output. Reserve full possible output.
   return (bytes + 1024) * 3 + maxTokens * 15;
