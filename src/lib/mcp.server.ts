@@ -96,8 +96,59 @@ import {
 
 import { readWorkspaceData } from "./mcp-workspace-data.server";
 import { readWorkspaceDataSchema, WORKSPACE_DATA_DESCRIPTION } from "./mcp-workspace-data";
+import { withProviderBudgetWorkspace } from "./provider-budget.server";
+import { resolveWorkspace, WorkspaceAccessError } from "./workspace-session.server";
 
 const MCP_PATH = "/mcp";
+const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
+// /mcp/<username> binds a connection to one workspace the login owns, so each
+// workspace can be added as its own connector in ChatGPT or Claude. Same rule as
+// profiles.username. "setup" is the app's own /mcp/setup page.
+const MCP_WORKSPACE_USERNAME = /^[a-z0-9_]{3,30}$/;
+const RESERVED_MCP_SEGMENTS = new Set(["setup"]);
+
+export type McpWorkspace = { id: string; username: string; displayName: string };
+export type FindMcpWorkspace = (
+  authUserId: string,
+  username: string,
+) => Promise<McpWorkspace | null>;
+
+/** The MCP resource a path names: "/mcp", or "/mcp/<username>" for a workspace-bound connector. */
+function mcpResourceFromPath(pathname: string) {
+  if (pathname === MCP_PATH) return { path: MCP_PATH, username: null };
+  const username = pathname.match(/^\/mcp\/([^/]+)$/)?.[1];
+  if (!username || !MCP_WORKSPACE_USERNAME.test(username) || RESERVED_MCP_SEGMENTS.has(username))
+    return null;
+  return { path: `${MCP_PATH}/${username}`, username };
+}
+
+async function findOwnedMcpWorkspace(
+  authUserId: string,
+  username: string,
+): Promise<McpWorkspace | null> {
+  try {
+    const { workspaces } = await resolveWorkspace(authUserId);
+    const match = workspaces.find(
+      (candidate) => candidate.username === username && candidate.status === "active",
+    );
+    return match ? { id: match.id, username, displayName: match.displayName } : null;
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) return null;
+    throw error;
+  }
+}
+
+/**
+ * Data access follows the workspace (as the web app's workspace cookie does); the login
+ * stays in authUserId. The bearer token is unchanged, so row-level security still checks
+ * the login's workspace membership.
+ */
+export function scopeMcpAuthToWorkspace(authInfo: AuthInfo, workspace: McpWorkspace): AuthInfo {
+  return {
+    ...authInfo,
+    extra: { userId: workspace.id, authUserId: userIdFrom(authInfo), workspace },
+  };
+}
 // ChatGPT's app dashboard scans this endpoint from the browser. Other origins
 // stay rejected so a DNS-rebinding page cannot call the MCP server.
 const MCP_BROWSER_ORIGINS = new Set([
@@ -2487,10 +2538,15 @@ export function createBentoMcpServer(
     };
     return cachedCreatorContext;
   };
+  const workspace = authInfo.extra?.workspace as McpWorkspace | undefined;
+  const workspaceBinding = workspace
+    ? `This connection is bound to the Bento workspace "${workspace.displayName}" (@${workspace.username}). Every read and write applies to that workspace only; the creator's other workspaces have their own connections. `
+    : "";
   const server = new McpServer(
     { name: "bento", version: "1.0.0" },
     {
       instructions:
+        workspaceBinding +
         "Use stable IDs returned by list tools. Before content planning or writing, read get_content_brain, get_content_routines, get_analytics_workspace and get_content_discover as relevant. These expose the creator voice, publishing cadence, performance and current stored signals. For full documents, imported source text, older runs, bookmarks and social history use read_workspace_data, follow nextCursor, and read truncated text by id. Empty or stale stored data is not permission to start paid refreshes. List accounts before posting or creating Auto-DMs. For one piece of content on several networks create ONE social post with all connectionIds, shared media uploaded once, and connectionOverrides[connectionId].bodyOverride for each caption. YouTube titleOverride/description/youtubePrivacy go in providerSettings.youtube. Edit by passing the existing post id; do not split or duplicate drafts for different captions. For local videos over 8 MB use begin_media_upload and its binary chunk instructions, not large base64 JSON or compression. Read skill://bento/bento/references/tools.md for complete examples. Publish now or delete only when the user explicitly requested that external action.",
       capabilities: { extensions: { "io.modelcontextprotocol/skills": {} } },
     },
@@ -2622,11 +2678,11 @@ async function authenticateMcpRequest(request: Request): Promise<AuthInfo> {
   };
 }
 
-function protectedResourceMetadata(request: Request) {
+function protectedResourceMetadata(request: Request, resourcePath: string) {
   const origin = new URL(request.url).origin;
   return Response.json(
     {
-      resource: `${origin}${MCP_PATH}`,
+      resource: `${origin}${resourcePath}`,
       authorization_servers: [`${publicSupabaseUrl()}/auth/v1`],
       scopes_supported: OAUTH_SCOPES,
       bearer_methods_supported: ["header"],
@@ -2648,8 +2704,11 @@ function applyMcpCors(response: Response, request: Request) {
   return response;
 }
 
-function unauthorized(request: Request, message = "Authorization required") {
-  const metadata = `${new URL(request.url).origin}/.well-known/oauth-protected-resource`;
+function unauthorized(request: Request, resourcePath: string, message = "Authorization required") {
+  // The default resource keeps its original metadata URL; workspace resources use the
+  // RFC 9728 path-inserted form so the advertised resource matches the URL the client called.
+  const suffix = resourcePath === MCP_PATH ? "" : resourcePath;
+  const metadata = `${new URL(request.url).origin}${PROTECTED_RESOURCE_PATH}${suffix}`;
   return Response.json(
     { error: "unauthorized", message },
     {
@@ -2686,10 +2745,16 @@ export async function handleBentoMcpRequest(
   request: Request,
   configuredOrigin: string | null | undefined,
   authenticate: (request: Request) => Promise<AuthInfo> = authenticateMcpRequest,
+  findWorkspace: FindMcpWorkspace = findOwnedMcpWorkspace,
 ): Promise<Response | null> {
   const captured = request.clone();
   try {
-    const response = await routeBentoMcpRequest(request, configuredOrigin, authenticate);
+    const response = await routeBentoMcpRequest(
+      request,
+      configuredOrigin,
+      authenticate,
+      findWorkspace,
+    );
     return response ? applyMcpCors(response, request) : null;
   } catch (error) {
     console.error("MCP request failed", error instanceof Error ? error.name : "unknown");
@@ -2701,6 +2766,7 @@ async function routeBentoMcpRequest(
   request: Request,
   configuredOrigin: string | null | undefined,
   authenticate: (request: Request) => Promise<AuthInfo>,
+  findWorkspace: FindMcpWorkspace,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   let expectedOrigin: string;
@@ -2712,13 +2778,13 @@ async function routeBentoMcpRequest(
     return null;
   }
   if (url.origin !== expectedOrigin) return null;
-  if (
-    url.pathname === "/.well-known/oauth-protected-resource" ||
-    url.pathname === "/.well-known/oauth-protected-resource/mcp"
-  ) {
-    return protectedResourceMetadata(request);
+  if (url.pathname === PROTECTED_RESOURCE_PATH) return protectedResourceMetadata(request, MCP_PATH);
+  if (url.pathname.startsWith(`${PROTECTED_RESOURCE_PATH}/`)) {
+    const described = mcpResourceFromPath(url.pathname.slice(PROTECTED_RESOURCE_PATH.length));
+    return described ? protectedResourceMetadata(request, described.path) : null;
   }
-  if (url.pathname !== MCP_PATH) return null;
+  const resource = mcpResourceFromPath(url.pathname);
+  if (!resource) return null;
   const origin = request.headers.get("origin");
   if (origin && origin !== url.origin && !MCP_BROWSER_ORIGINS.has(origin)) {
     return Response.json({ error: "Invalid origin" }, { status: 403 });
@@ -2730,7 +2796,8 @@ async function routeBentoMcpRequest(
   try {
     authInfo = await authenticate(request);
   } catch (error) {
-    if (error instanceof RequestHttpError && error.statusCode === 401) return unauthorized(request);
+    if (error instanceof RequestHttpError && error.statusCode === 401)
+      return unauthorized(request, resource.path);
     throw error;
   }
   try {
@@ -2744,7 +2811,24 @@ async function routeBentoMcpRequest(
     }
     throw error;
   }
-  const response = await mcpHandler.fetch(request, { authInfo });
+  let response: Response;
+  if (resource.username) {
+    const workspace = await findWorkspace(userIdFrom(authInfo), resource.username);
+    if (!workspace) {
+      return Response.json(
+        {
+          error: "workspace_not_found",
+          message: `This Bento account has no active workspace @${resource.username}.`,
+        },
+        { status: 404, headers: { "cache-control": "no-store" } },
+      );
+    }
+    response = await withProviderBudgetWorkspace(workspace.id, () =>
+      mcpHandler.fetch(request, { authInfo: scopeMcpAuthToWorkspace(authInfo, workspace) }),
+    );
+  } else {
+    response = await mcpHandler.fetch(request, { authInfo });
+  }
   response.headers.set("cache-control", "no-store");
   return response;
 }

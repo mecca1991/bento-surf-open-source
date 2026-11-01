@@ -31,6 +31,7 @@ import {
   createBentoAppTools,
   defaultBentoMcpOperations,
   handleBentoMcpRequest,
+  scopeMcpAuthToWorkspace,
 } from "./mcp.server";
 
 process.env.SUPABASE_URL ||= "https://test.supabase.co";
@@ -133,6 +134,136 @@ describe("Bento MCP HTTP surface", () => {
       if (previousPublic === undefined) delete process.env.VITE_SUPABASE_URL;
       else process.env.VITE_SUPABASE_URL = previousPublic;
     }
+  });
+
+  describe("workspace-bound connectors at /mcp/<username>", () => {
+    const workspace = {
+      id: "00000000-0000-4000-8000-0000000000aa",
+      username: "intrvuer",
+      displayName: "Intrvuer",
+    };
+    const findWorkspace = vi.fn(async (_authUserId: string, username: string) =>
+      username === workspace.username ? workspace : null,
+    );
+    const initialize = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "probe", version: "1.0.0" },
+      },
+    };
+    const post = (path: string, body: unknown) =>
+      new Request(`http://localhost:8080${path}`, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${authInfo.token}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": "2025-11-25",
+        },
+        body: JSON.stringify(body),
+      });
+
+    it("publishes protected-resource metadata for the workspace path", async () => {
+      const response = await handleBentoMcpRequest(
+        new Request("http://localhost:8080/.well-known/oauth-protected-resource/mcp/intrvuer"),
+        "http://localhost:8080",
+      );
+      expect(response?.status).toBe(200);
+      await expect(response?.json()).resolves.toMatchObject({
+        resource: "http://localhost:8080/mcp/intrvuer",
+      });
+    });
+
+    it("points the 401 challenge at the workspace path's metadata", async () => {
+      const response = await handleBentoMcpRequest(
+        post("/mcp/intrvuer", initialize),
+        "http://localhost:8080",
+        async () => {
+          throw new RequestHttpError(401, "Unauthorized");
+        },
+        findWorkspace,
+      );
+      expect(response?.status).toBe(401);
+      expect(response?.headers.get("www-authenticate")).toContain(
+        'resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource/mcp/intrvuer"',
+      );
+    });
+
+    it("leaves the app's /mcp/setup page and malformed paths to the frontend router", async () => {
+      for (const path of [
+        "/mcp/setup",
+        "/mcp/Intrvuer",
+        "/mcp/ab",
+        "/mcp/intrvuer/extra",
+        "/mcp/",
+        "/.well-known/oauth-protected-resource/mcp/setup",
+      ]) {
+        const response = await handleBentoMcpRequest(
+          new Request(`http://localhost:8080${path}`),
+          "http://localhost:8080",
+          async () => authInfo,
+          findWorkspace,
+        );
+        expect(response, path).toBeNull();
+      }
+    });
+
+    it("binds the connection to the named workspace and tells the agent which one", async () => {
+      findWorkspace.mockClear();
+      mcpMocks.enforceRequestRateLimit.mockClear();
+      const response = await handleBentoMcpRequest(
+        post("/mcp/intrvuer", initialize),
+        "http://localhost:8080",
+        async () => authInfo,
+        findWorkspace,
+      );
+      expect(response?.status).toBe(200);
+      const { result } = await payload(response!);
+      expect(result.instructions).toContain('Bento workspace "Intrvuer" (@intrvuer)');
+      expect(findWorkspace).toHaveBeenCalledWith(authInfo.extra!.userId, "intrvuer");
+      // Rate limits stay per login, not per workspace.
+      expect(mcpMocks.enforceRequestRateLimit).toHaveBeenCalledWith(
+        "PUBLIC_API_RATE_LIMITER",
+        "mcp",
+        authInfo.extra!.userId,
+      );
+    });
+
+    it("keeps the default /mcp connection unbound", async () => {
+      const response = await handleBentoMcpRequest(
+        post("/mcp", initialize),
+        "http://localhost:8080",
+        async () => authInfo,
+        findWorkspace,
+      );
+      const { result } = await payload(response!);
+      expect(result.instructions).not.toContain("Bento workspace");
+    });
+
+    it("returns 404 for a workspace this login does not own", async () => {
+      const response = await handleBentoMcpRequest(
+        post("/mcp/someone_else", initialize),
+        "http://localhost:8080",
+        async () => authInfo,
+        findWorkspace,
+      );
+      expect(response?.status).toBe(404);
+      await expect(response?.json()).resolves.toMatchObject({ error: "workspace_not_found" });
+    });
+
+    it("scopes data access to the workspace while remembering the login", () => {
+      const scoped = scopeMcpAuthToWorkspace(authInfo, workspace);
+      expect(scoped.token).toBe(authInfo.token);
+      expect(scoped.extra).toEqual({
+        userId: workspace.id,
+        authUserId: authInfo.extra!.userId,
+        workspace,
+      });
+    });
   });
 
   it("leaves the app-host MCP page to the frontend router", async () => {

@@ -929,12 +929,12 @@ export default {
       );
     }
 
+    // /mcp/<username> is a workspace-bound MCP connector. The MCP handler returns
+    // null for anything it does not serve (such as the app's /mcp/setup page),
+    // which then falls through to the frontend router below.
     if (
-      [
-        "/mcp",
-        "/.well-known/oauth-protected-resource",
-        "/.well-known/oauth-protected-resource/mcp",
-      ].includes(path)
+      /^\/mcp(\/[^/]+)?$/.test(path) ||
+      /^\/\.well-known\/oauth-protected-resource(\/mcp(\/[^/]+)?)?$/.test(path)
     ) {
       try {
         const { handleBentoMcpRequest } = await import("./lib/mcp.server");

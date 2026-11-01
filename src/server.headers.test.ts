@@ -35,6 +35,36 @@ describe("deployment security headers", () => {
     expect(metadata.headers.get("vary")?.toLowerCase()).toContain("origin");
   });
 
+  it("serves workspace-bound MCP connectors and leaves /mcp/setup to the app", async () => {
+    const env = {
+      APP_ENV: "development",
+      VITE_APP_URL: "https://self.example",
+      VITE_PUBLIC_URL: "https://self.example",
+      SUPABASE_URL: "https://example.supabase.co",
+    };
+    const request = (path: string, init?: RequestInit) =>
+      Object.assign(new Request(`https://self.example${path}`, init), {
+        runtime: { cloudflare: { env } },
+      }) as unknown as Parameters<typeof server.fetch>[0];
+    const metadata = await server.fetch(
+      request("/.well-known/oauth-protected-resource/mcp/intrvuer"),
+    );
+    expect(metadata.status).toBe(200);
+    await expect(metadata.json()).resolves.toMatchObject({
+      resource: "https://self.example/mcp/intrvuer",
+    });
+    const challenge = await server.fetch(request("/mcp/intrvuer", { method: "POST", body: "{}" }));
+    expect(challenge.status).toBe(401);
+    expect(challenge.headers.get("www-authenticate")).toContain(
+      'resource_metadata="https://self.example/.well-known/oauth-protected-resource/mcp/intrvuer"',
+    );
+    // The app's signed-out guard redirects to login; MCP would have answered 401 instead.
+    const setupPage = await server.fetch(request("/mcp/setup"));
+    expect(setupPage.status).toBe(302);
+    expect(setupPage.headers.get("location")).toContain("/login");
+    expect(setupPage.headers.get("www-authenticate")).toBeNull();
+  });
+
   it.each(["/api/tools/transcribe", "/api/tools/media"])(
     "does not expose removed public marketing endpoint %s",
     async (path) => {
