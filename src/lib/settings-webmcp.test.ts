@@ -576,6 +576,17 @@ describe("Settings WebMCP tools", () => {
     expect(refresh).toHaveBeenCalledTimes(6);
   });
 
+  it("signs out only this browser so connected AI agents keep their sessions", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const navigate = vi.fn();
+    await tool("manage_settings_security", vi.fn(), navigate).found.execute(
+      { action: "sign_out" },
+      { signal: signal() },
+    );
+    expect(mocks.signOut).toHaveBeenCalledWith({ scope: "local" });
+    expect(navigate).toHaveBeenCalledWith("/", "replace");
+  });
+
   it("uses the existing recent-auth deletion flow and replaces the signed-out page", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const navigate = vi.fn();

@@ -1007,7 +1007,8 @@ export function createSettingsWebMcpTools({
           };
         }
         if (input.action === "sign_out") {
-          const { error } = await supabase.auth.signOut();
+          // Local scope: a global sign-out also revokes the OAuth sessions of connected AI agents.
+          const { error } = await supabase.auth.signOut({ scope: "local" });
           if (error) throw new Error(error.message);
           return {
             destination: safeDestination("/", true),

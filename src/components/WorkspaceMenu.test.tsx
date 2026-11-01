@@ -116,6 +116,19 @@ describe("WorkspaceMenu", () => {
     expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
   });
 
+  it("signs out only this browser so connected AI agents keep their sessions", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign });
+    const user = userEvent.setup();
+    render(<WorkspaceMenu session={session} collapsed={false} />);
+    await user.click(screen.getByRole("button", { name: "Open workspace menu" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
+    expect(mocks.signOut).toHaveBeenCalledWith({ scope: "local" });
+    vi.unstubAllGlobals();
+  });
+
   it("clears cached workspace data before invalidating after a switch", async () => {
     const user = userEvent.setup();
     render(<WorkspaceMenu session={session} collapsed={false} />);

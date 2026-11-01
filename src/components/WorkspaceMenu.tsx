@@ -76,7 +76,8 @@ export function WorkspaceMenu({
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    // Local scope: a global sign-out also revokes the OAuth sessions of connected AI agents (ChatGPT, Claude).
+    await supabase.auth.signOut({ scope: "local" });
     window.location.assign("/");
   };
 
