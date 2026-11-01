@@ -33,6 +33,20 @@ describe("Discover media enrichment", () => {
     });
     expect(result.stats).not.toHaveProperty("views");
   });
+  it("reads Instagram's written preview date as a UTC calendar day in any server time zone", () => {
+    const original = process.env.TZ;
+    try {
+      for (const zone of ["America/Los_Angeles", "Asia/Dubai", "Pacific/Kiritimati"]) {
+        process.env.TZ = zone;
+        expect(publicPostMetadata(instagramHtml, post.canonicalUrl).publishedAt).toBe(
+          "2026-10-05T00:00:00.000Z",
+        );
+      }
+    } finally {
+      if (original === undefined) delete process.env.TZ;
+      else process.env.TZ = original;
+    }
+  });
   it("preserves structured carousel media and the author's actual photo", () => {
     const html = `<script type="application/ld+json">${JSON.stringify({ "@type": "SocialMediaPosting", articleBody: "Full post", author: { "@type": "Person", name: "Creator", url: "https://example.com/creator", image: "https://example.com/avatar.jpg" }, image: ["https://example.com/1.jpg", "https://example.com/2.jpg"] })}</script>`;
     const result = publicPostMetadata(html, "https://example.com/post");

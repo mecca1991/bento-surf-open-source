@@ -187,6 +187,35 @@ function visitObjects(payload: unknown, visitor: (item: Record<string, unknown>)
   visit(payload);
 }
 
+const MONTHS = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+];
+
+/**
+ * Instagram previews write the day as "October 5, 2026". Date.parse reads that form as local
+ * midnight, so the stored instant moved with the server's time zone. Pin it to the UTC day,
+ * the same way an ISO date-only value parses. Anything else passes through unchanged.
+ */
+function utcCalendarDay(value: string | undefined) {
+  const match = value?.trim().match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/);
+  if (!match) return value;
+  const month = MONTHS.indexOf(match[1].toLowerCase());
+  const day = Number(match[2]);
+  const date = new Date(Date.UTC(Number(match[3]), month, day));
+  return month >= 0 && date.getUTCDate() === day ? date.toISOString() : value;
+}
+
 function publicationDate(value: unknown, unixSeconds = false) {
   if (unixSeconds) {
     const seconds = observedCount(value);
@@ -500,7 +529,7 @@ export function publicPostMetadata(
     if (name && !provider.author) result.author = name;
     if (handle && !provider.authorUrl) result.authorUrl = `https://www.instagram.com/${handle}/`;
     const descriptionDate = description.match(/ - [\w.]+ on ([^:]+):/)?.[1];
-    result.publishedAt ||= publicationDate(descriptionDate);
+    result.publishedAt ||= publicationDate(utcCalendarDay(descriptionDate));
     // These are observed counts from Instagram's own preview, not inferred popularity.
     const previewCounts = descriptionDate ? description.split(/ - [\w.]+ on /)[0] : "";
     for (const match of previewCounts.matchAll(

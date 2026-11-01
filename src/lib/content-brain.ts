@@ -138,7 +138,7 @@ export function completeContentStrategy(content: string) {
     "Notes",
   ];
   // Headings may carry a trailing colon; a pillar heading may put its weight anywhere
-  // on the line ("### 40% Name", "### Name (40%)", "### Name — 40 %"). Models vary
+  // on the line ("### 40% Name", "### Name (40%)", "### Name \u2014 40 %"). Models vary
   // and the strict shape rejected otherwise complete strategies.
   if (
     !sections.every((section) =>

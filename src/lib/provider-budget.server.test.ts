@@ -57,8 +57,11 @@ describe("provider cost reservations", () => {
   it("counts UTF-8 bytes and full output, and rejects oversized prompts/models", () => {
     expect(aiReservationMicrousd(["🦊"], 100)).toBeGreaterThan(aiReservationMicrousd(["a"], 100));
     expect(aiReservationMicrousd([], 101) - aiReservationMicrousd([], 100)).toBe(15);
-    expect(() => aiReservationMicrousd("a".repeat(128001), 100)).toThrow(/too large/);
-    expect(() => aiReservationMicrousd([], 8001)).toThrow(/too large/);
+    // Guard sized for Groq's 131k-token context (ef1dd6e): 400 KB of JSON input, 16k output tokens.
+    // A string serializes with two quote bytes, so 399,998 characters is exactly 400,000 bytes.
+    expect(() => aiReservationMicrousd("a".repeat(399_998), 16_000)).not.toThrow();
+    expect(() => aiReservationMicrousd("a".repeat(399_999), 100)).toThrow(/too large/);
+    expect(() => aiReservationMicrousd([], 16_001)).toThrow(/too large/);
   });
   it("disables paid X content reads by default without touching the provider or database", async () => {
     vi.stubEnv("X_PAID_READS_ENABLED", "");

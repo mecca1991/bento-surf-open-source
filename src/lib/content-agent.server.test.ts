@@ -314,7 +314,8 @@ describe("content Agent server", () => {
     };
     await generateConnectedBrainSuggestions(posts, undefined, { AI: ai });
     const input = ai.run.mock.calls[0][1] as Record<string, unknown>;
-    expect(input.max_tokens).toBe(4000);
+    // Raised in 804eb03: profile, voice, stories and both strategies were cut off at 4,000.
+    expect(input.max_tokens).toBe(8000);
     expect(input.response_format).toEqual({ type: "json_object" });
     const messages = input.messages as Array<{ role: string; content: string }>;
     expect(messages.find((message) => message.role === "system")?.content).toContain(
